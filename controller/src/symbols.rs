@@ -275,10 +275,16 @@ impl Worker {
         requests: Vec<SymbolRequest>,
         cache: PathBuf,
         search: Option<String>,
-    ) -> Result<(), String> {
-        self.sender
-            .try_send((key, requests, cache, search))
-            .map_err(|e| format!("symbol queue: {e}"))
+    ) -> Result<bool, String> {
+        match self.sender.try_send((key, requests, cache, search)) {
+            Ok(()) => Ok(true),
+            // Backpressure defers preparation; it is not an activation failure
+            // or an arbitrary limit on the number of matching processes.
+            Err(std::sync::mpsc::TrySendError::Full(_)) => Ok(false),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                Err("symbol worker disconnected".to_owned())
+            }
+        }
     }
     pub(crate) fn try_result(&self) -> Option<(u64, Result<Vec<Value>, String>)> {
         self.receiver.try_recv().ok()
@@ -288,6 +294,23 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saturated_worker_queue_defers_then_accepts_retry() {
+        let (sender, jobs) = std::sync::mpsc::sync_channel(8);
+        let (_results, receiver) = std::sync::mpsc::channel();
+        let worker = Worker { sender, receiver };
+        for key in 0..8 {
+            assert!(worker
+                .submit(key, Vec::new(), PathBuf::new(), None)
+                .unwrap());
+        }
+        assert!(!worker.submit(8, Vec::new(), PathBuf::new(), None).unwrap());
+        assert_eq!(jobs.recv().unwrap().0, 0);
+        assert!(worker.submit(8, Vec::new(), PathBuf::new(), None).unwrap());
+        drop(jobs);
+        assert!(worker.submit(9, Vec::new(), PathBuf::new(), None).is_err());
+    }
+
     #[test]
     fn cache_identity_ignores_aslr_but_not_architecture_or_pdb_age() {
         let a = SymbolRequest {

@@ -81,7 +81,9 @@ impl Prepared {
             return Err("controlled launch image must match the companion architecture".to_owned());
         }
         let breakpoint: &[u8] = if cfg!(target_arch = "aarch64") {
-            &[0x00, 0x00, 0x20, 0xd4]
+            // Windows uses BRK #0xF000, as emitted by MSVC __debugbreak.
+            // https://learn.microsoft.com/en-us/cpp/intrinsics/debugbreak
+            &[0x00, 0x00, 0x3e, 0xd4]
         } else {
             &[0xcc]
         };
@@ -180,7 +182,10 @@ impl Prepared {
                     EXIT_PROCESS_DEBUG_EVENT => {
                         let _ =
                             ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE);
-                        return Err("launched process exited before its entrypoint".to_owned());
+                        return Err(format!(
+                            "launched process exited before its entrypoint (0x{:08x})",
+                            event.u.ExitProcess.dwExitCode
+                        ));
                     }
                     _ => {}
                 }

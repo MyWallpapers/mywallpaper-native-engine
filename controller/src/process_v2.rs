@@ -474,13 +474,14 @@ fn queue_symbols(
         *next_job = next_job
             .checked_add(1)
             .ok_or("symbol job identifier exhausted")?;
-        worker.submit(
+        if worker.submit(
             *next_job,
             requests,
             cache.to_path_buf(),
             search.map(str::to_owned),
-        )?;
-        managed.symbol_job = Some(*next_job);
+        )? {
+            managed.symbol_job = Some(*next_job);
+        }
     }
     Ok(())
 }

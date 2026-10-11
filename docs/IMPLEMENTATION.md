@@ -12,6 +12,16 @@ Work is isolated on `codex/native-engine-foundation`. Do not change the live
 Explorer agent, the original checkout, or the main conversation's application
 deployment. Native effects and settings semantics remain add-on-owned.
 
+MyWallpaper baseline commit: `299548ebcc20770fd73b10bdffd5f05586fbe126`.
+The ledger fingerprint above was rechecked unchanged during qualification.
+
+| Current decision | Classification | Verified relationship to this prototype |
+| --- | --- | --- |
+| DEC-0012 | Conforme | Core identity/lifetime/routing stays generic; effects and settings remain add-on-owned |
+| DEC-0011 | Conforme | Native add-ons stay full-trust; no sandbox or permission catalogue introduced |
+| DEC-0157 | Conforme au perimetre preparatoire | Isolated prototype and architecture experiments do not add a generic engine ecosystem or ARM64 Desktop to launch |
+| DEC-0160 | Question reellement nouvelle, evidence only | Replacement foundation adds evidence to the open engine choice; it does not ratify a migration or reopen the closed alternative Windhawk licence path |
+
 ## Execution order and acceptance
 
 1. Backend: replace configure-time source substitutions with a reviewed,
@@ -66,7 +76,7 @@ Rust 1.94.1. The tests used dedicated child fixtures, never live Explorer.
 | Check | x64 | x86 |
 | --- | --- | --- |
 | CTest native suites | 4/4 passed | 4/4 passed |
-| Rust unit suites | 14/14 passed | 14/14 passed |
+| Rust unit suites | 15/15 passed | 15/15 passed |
 | Installed SDK consumer | Compiled | Compiled |
 | Foundation integration | Passed, including cross-architecture injection | Passed |
 | Same-artifact start/stop cycles after warm-up | 1,000 | 1,000 |
@@ -118,6 +128,9 @@ The real Windows symbol probe is recorded separately in
 - Retained process-lifetime pins, identity hashes, backend chain semantics,
   cooperative call gate and original owner-handle transfer. Static non-observation
   was not used to delete unrelated native probe or integration code.
+- A saturated symbol job queue defers and retries preparation instead of
+  terminating a companion with many matching processes. Its bounded queue and
+  successful retry/disconnection behavior are covered by a Rust regression test.
 - Updated the original session test's rejection expectation to match the existing
   wire contract: recoverable active settings rejection is an stderr diagnostic,
   not a terminal host error. Added scenario tests for new behavior rather than
@@ -127,7 +140,11 @@ The real Windows symbol probe is recorded separately in
 
 - ARM64 local compiler/target execution are unavailable on this host. The source,
   build/package dispatch and matching CI runner are provided; runtime support
-  remains unqualified until that job passes.
+  remains unqualified until that job passes. The first ARM64 job compiled, passed
+  the four native and fourteen initial Rust suites, then failed the owned launch.
+  Its original breakpoint used generic BRK #0 rather than Windows' documented
+  [BRK #0xF000](https://learn.microsoft.com/en-us/cpp/intrinsics/debugbreak).
+  The instruction was corrected and the matching fixture qualification is rerun.
 - A prepared exact address does not guarantee the internal function's calling
   convention or behavior. Add-ons maintain their Windows-specific knowledge;
   the core maintains generic discovery, caching and lifecycle mechanisms.
