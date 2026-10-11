@@ -70,8 +70,29 @@ The SDK source archive is checked against a complete hash inventory and rejects
 private controller/agent/backend sources and binaries. Its template includes
 root licence, notices, manifest, device settings, native build declaration and
 ignored generated outputs. Its manifest and dev configuration passed the
-existing MyWallpaper parsers. ARM64 execution and the full packaged creator
-path are recorded by the three-architecture CI workflow before publication.
+existing MyWallpaper parsers. The independently copied project also passed
+`mywallpaper check` after build, with valid licence and Git provenance fields.
+The SDK builder was invoked through the template's PowerShell native entry.
+
+All three jobs passed in GitHub Actions run
+[38151195857](https://github.com/MyWallpapers/mywallpaper-native-engine/actions/runs/38151195857),
+building and executing commit `25ea758697d6caa31f19fe005c80f3f559b466af` on
+native x64, x86 and ARM64 Windows runners. This includes the installed SDK,
+optional-symbol recovery, shared runtime, source export and original session
+scenarios on x64. MyWallpaper diagnostics are commit
+`e6abdbfa25` on its isolated `codex/native-engine-creator` branch.
+
+| CI target | Foundation reuse cycles | Physical hook records | Target private-byte change | SDK cycles / target change |
+| --- | ---: | ---: | ---: | ---: |
+| x64 | 1,000 | 1 | 0 bytes | 100 / +69,632 bytes |
+| x86 | 1,000 | 1 | +4,096 bytes | 100 / +65,536 bytes |
+| ARM64 | 1,000 | 1 | +36,864 bytes | 100 / -77,824 bytes |
+
+These are before/after observations, not a proof of zero allocations or an
+unbounded-duration guarantee. The explicit record count verifies reuse of the
+same physical hook; different artifacts and arbitrary add-on resources remain
+outside that reuse measurement. ARM64 SDK qualification does not add ARM64
+Desktop launch support.
 
 ## Impact and retained contracts
 

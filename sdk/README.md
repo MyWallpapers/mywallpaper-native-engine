@@ -53,8 +53,9 @@ native build declarations. In a copied example repository, set
 `MW_NATIVE_SDK_HOME` before invoking the MyWallpaper CLI development command
 (`mywallpaper dev --config mywallpaper.config.json`).
 `mywallpaper check` validates the prepared project before publication.
-Initialize and commit the copied project as its own Git repository before that
-check; its root LICENSE and dependency notices are included in the template.
+Initialize and commit the copied project as its own Git repository, with its
+own `origin` remote, before that check. Its root LICENSE and dependency notices
+are included in the template. Release tags must match its manifest version.
 The CLI's prepared native entries remain under `native/out`.
 
 The MyWallpaper launch scope remains x64. The SDK and fixture also support x86
