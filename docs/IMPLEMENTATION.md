@@ -19,8 +19,8 @@ The ledger fingerprint above was rechecked unchanged during qualification.
 | --- | --- | --- |
 | DEC-0012 | Conforme | Core identity/lifetime/routing stays generic; effects and settings remain add-on-owned |
 | DEC-0011 | Conforme | Native add-ons stay full-trust; no sandbox or permission catalogue introduced |
-| DEC-0157 | Conforme au perimetre preparatoire | Isolated prototype and architecture experiments do not add a generic engine ecosystem or ARM64 Desktop to launch |
-| DEC-0160 | Question reellement nouvelle, evidence only | Replacement foundation adds evidence to the open engine choice; it does not ratify a migration or reopen the closed alternative Windhawk licence path |
+| DEC-0157 | Conforme | Isolated prototype and architecture experiments do not add a generic engine ecosystem or ARM64 Desktop to launch |
+| DEC-0160 | Question réellement nouvelle | Replacement foundation adds evidence to the open engine choice; it does not ratify a migration or reopen the closed alternative Windhawk licence path |
 
 ## Execution order and acceptance
 
@@ -49,19 +49,20 @@ The ledger fingerprint above was rechecked unchanged during qualification.
 
 ## Implemented foundation
 
-All seven implementation stages above are complete in this worktree. ARM64
-runtime qualification is the remaining evidence item, not a production support
-claim. The GitHub repository was verified PRIVATE on 2026-10-11.
+All seven implementation stages above are complete, including matching ARM64
+fixture execution. This qualifies the exercised foundation scenarios, not broad
+production support across Windows builds. The GitHub repository was reverified
+PRIVATE after qualification on 2026-10-11.
 
 | Stage | Concrete implementation | Acceptance evidence |
 | --- | --- | --- |
-| Backend | Verified upstream snapshot plus one versioned build-copy patch; policy uses backend structures directly | Existing backend chain/reuse tests pass on x64 and x86 |
+| Backend | Verified upstream snapshot plus one versioned build-copy patch; policy uses backend structures directly | Existing backend chain/reuse tests pass on x64, x86 and ARM64 |
 | Lifecycle | ABI 2 logical contexts, singleton/multiple declaration, independent instance locks, owner-death hook bypass | Same DLL serves two contexts; one blocked callback does not block the other; owner death bypasses the blocked context |
 | Symbols | Exact exterior DbgHelp worker, WinHTTP public-server transport, GUID/age-bound RVA cache and agent revalidation | Non-exported fixture function modified; absent name and mismatched PDB rejected; warm offline cache passes |
 | Target manager | Image/window/architecture selection, single/all matching, restart tracking and accepted-snapshot replay | Two matching processes, replacement process and rejected-settings replay tests pass |
 | Owned launch | Loader-complete PE-entrypoint debugger barrier, matching companion, only the owned child selected | Very first application call already hooked; normal stop restores behavior; another same-image process stays unchanged |
-| Distribution | Shared architecture-specific runtime, cross-architecture injection helper with original owner, installed header-only SDK | x64-to-x86 injection/owner-loss tests pass; standalone installed-SDK consumers compile for x64 and x86 |
-| Qualification | Native/Rust suites, fixture integration, private-memory and original session scenarios | Results below; matching ARM64 CI job added |
+| Distribution | Shared architecture-specific runtime, cross-architecture injection helper with original owner, installed header-only SDK | Local x64-to-x86 injection/owner-loss tests pass; standalone installed-SDK consumers compile for x64, x86 and ARM64 |
+| Qualification | Native/Rust suites, fixture integration, private-memory and original session scenarios | Local and matching CI results below; all three architecture jobs passed |
 
 No taskbar rules, styling framework, permissions catalogue, sandbox or second
 MyWallpaper settings protocol was added. The process-v2 version 5 host contract
@@ -80,7 +81,7 @@ Rust 1.94.1. The tests used dedicated child fixtures, never live Explorer.
 | Installed SDK consumer | Compiled | Compiled |
 | Foundation integration | Passed, including cross-architecture injection | Passed |
 | Same-artifact start/stop cycles after warm-up | 1,000 | 1,000 |
-| Private bytes before / after cycles | 1,155,072 / 1,155,072 | 1,515,520 / 1,519,616 |
+| Private bytes before / after cycles | 1,216,512 / 1,216,512 | 1,433,600 / 1,437,696 |
 | Retained hook records before / after | 1 / 1 | 1 / 1 |
 | Trampoline region bytes before / after | 65,536 / 65,536 | 65,536 / 65,536 |
 | Other instance settings while one callback blocked | 32 ms | 31 ms |
@@ -93,8 +94,8 @@ memory across arbitrary DLL versions, identities or targets.
 The retained session suite also passed 50 restarts: two concurrent add-ons,
 owner-specific cleanup, byte-identical rematerialization, differing-image
 rejection, invalid callback rejection, stdin EOF and abrupt owner termination.
-Its target ended with 3 versus 5 baseline threads, 106 versus 111 handles, and
-1,134,592 versus 1,200,128 private bytes.
+Its target ended with 3 versus 5 baseline threads, 105 versus 110 handles, and
+1,138,688 versus 1,208,320 private bytes.
 
 A separate cold download resolved the non-exported `ntdll.dll!RtlpAllocateHeap`
 from Microsoft's matching public PDB, followed by a warm offline cache hit.
@@ -108,6 +109,39 @@ architecture `ctest.log`, `rust-tests.log`, `sdk-consumer-build.log`, plus
 `foundation-cross.log`, `foundation-x86.log`, and `session-latest.log`.
 The real Windows symbol probe is recorded separately in
 `C:/Users/rayan/AppData/Local/Temp/mw-native-foundation-build/windows-symbols.log`.
+
+## Matching CI qualification
+
+Qualified source commit: `8ff92fe4a9f6143b78564a9009784e9d192185a9`.
+[GitHub run 38128542232](https://github.com/MyWallpapers/mywallpaper-native-engine/actions/runs/38128542232)
+completed successfully on 2026-10-11. The three jobs compiled and executed the
+native agent, SDK consumer, unit suites and fixture integration. x86 execution
+uses a Windows x64 runner; ARM64 execution uses the matching Windows ARM runner.
+
+| Observed CI check | x64 / windows-2025 | x86 / windows-2025 | ARM64 / windows-11-arm |
+| --- | --- | --- | --- |
+| CTest | 4/4 | 4/4 | 4/4 |
+| Rust | 15/15 | 15/15 | 15/15 |
+| Installed SDK consumer | Compiled | Compiled | Compiled |
+| Foundation integration | Passed | Passed | Passed |
+| Private bytes before / after 1,000 cycles | 1,150,976 / 1,150,976 | 1,507,328 / 1,511,424 | 1,245,184 / 1,265,664 |
+| Retained hook records before / after | 1 / 1 | 1 / 1 | 1 / 1 |
+| Trampoline region bytes before / after | 65,536 / 65,536 | 65,536 / 65,536 | 65,536 / 65,536 |
+| Other instance settings while one callback blocked | 31 ms | 16 ms | 29 ms |
+
+All three integrations include deferred stop with valid hook handles, partial
+start rollback, companion shutdown retries, cleanup of no-hook resources after
+owner loss, late symbol lookup while active, reconnect and owned-entrypoint
+activation. The existing 50-cycle session suite also passed in the x64 job.
+The measured ARM64 private-byte variation is 20 KiB while hook records and
+trampoline allocation remain constant; it does not support a claim of exactly
+zero whole-process allocation or unlimited-workload bounded memory.
+
+Downloaded evidence is retained locally under
+`C:/Users/rayan/AppData/Local/Temp/mw-native-foundation-ci-38128542232`, with each
+architecture's `foundation.json`, build/unit logs and engine manifest. GitHub
+artifacts use seven-day retention. Final report-only edits do not change the
+qualified code; the source commit above is the reproducible qualification anchor.
 
 ## Scoped dead-code and contract review
 
@@ -134,7 +168,8 @@ The real Windows symbol probe is recorded separately in
 - Traced the no-hook startup/owner-loss path. A successful start is marked active
   before cooperative cleanup so that an empty hook list does not skip the add-on's
   stop callback. A dedicated fixture owns and releases a native event resource
-  while its start callback is blocked; its owner-loss regression passes on x64.
+  while its start callback is blocked; its owner-loss regression passes on all
+  three architectures.
 - Traced normal stop and partial-start rollback with `MW_ERROR_DRAIN_PENDING`.
   Effects are disabled while logical hook IDs remain valid for the stop retry;
   successful cleanup retires those handles. The companion performs bounded
@@ -147,13 +182,11 @@ The real Windows symbol probe is recorded separately in
 
 ## Qualification limits and deliberate boundaries
 
-- ARM64 local compiler/target execution are unavailable on this host. The source,
-  build/package dispatch and matching CI runner are provided; runtime support
-  remains unqualified until that job passes. The first ARM64 job compiled, passed
-  the four native and fourteen initial Rust suites, then failed the owned launch.
-  Its original breakpoint used generic BRK #0 rather than Windows' documented
-  [BRK #0xF000](https://learn.microsoft.com/en-us/cpp/intrinsics/debugbreak).
-  The instruction was corrected and the matching fixture qualification is rerun.
+- ARM64 runs on the matching CI machine, not this x64 development host. Its
+  owned-entrypoint barrier uses Windows' documented
+  [BRK #0xF000](https://learn.microsoft.com/en-us/cpp/intrinsics/debugbreak),
+  and that path passes the same runtime fixture as x64 and x86. These finite
+  fixture runs do not establish Explorer or all-Windows-build compatibility.
 - A prepared exact address does not guarantee the internal function's calling
   convention or behavior. Add-ons maintain their Windows-specific knowledge;
   the core maintains generic discovery, caching and lifecycle mechanisms.
