@@ -231,8 +231,12 @@ fn report_addon_rejection<W: Write>(
         .and_then(Value::as_str)
         .unwrap_or(fallback_message);
     if is_recoverable_active_addon_rejection(response, addon_id) {
-        eprintln!(
-            "mw-native-engine add-on {addon_id} rejected {operation}; companion remains active: {message}"
+        crate::diagnostics::emit(
+            "warning",
+            error_code,
+            operation,
+            &format!("add-on {addon_id} rejected {operation}; companion remains active: {message}"),
+            None,
         );
     } else {
         wire_error(writer, message, error_code);
@@ -437,6 +441,8 @@ struct ManagedSession {
     session: AgentSession,
     active: bool,
     symbol_job: Option<u64>,
+    symbol_requests: Vec<crate::symbols::SymbolRequest>,
+    symbol_retry_at: std::time::Instant,
 }
 
 fn logical_identity(addon_id: &str, scratch: &str, digest: &str) -> String {
@@ -482,17 +488,28 @@ fn queue_symbols(
     search: Option<&str>,
     next_job: &mut u64,
 ) -> Result<(), String> {
-    if managed.symbol_job.is_some() {
+    managed.symbol_requests = pending_symbols(response, &managed.session.addon_id)?;
+    submit_symbols(managed, worker, cache, search, next_job)
+}
+
+#[cfg(windows)]
+fn submit_symbols(
+    managed: &mut ManagedSession,
+    worker: &crate::symbols::Worker,
+    cache: &std::path::Path,
+    search: Option<&str>,
+    next_job: &mut u64,
+) -> Result<(), String> {
+    if managed.symbol_job.is_some() || std::time::Instant::now() < managed.symbol_retry_at {
         return Ok(());
     }
-    let requests = pending_symbols(response, &managed.session.addon_id)?;
-    if !requests.is_empty() {
+    if !managed.symbol_requests.is_empty() {
         *next_job = next_job
             .checked_add(1)
             .ok_or("symbol job identifier exhausted")?;
         if worker.submit(
             *next_job,
-            requests,
+            managed.symbol_requests.clone(),
             cache.to_path_buf(),
             search.map(str::to_owned),
         )? {
@@ -692,6 +709,8 @@ fn run_after_init<W: Write>(
                     },
                     active: false,
                     symbol_job: None,
+                    symbol_requests: Vec::new(),
+                    symbol_retry_at: Instant::now(),
                 };
                 let fields = serde_json::from_value(
                     json!({"path":addon_path.to_string_lossy(),"settings":settings}),
@@ -710,10 +729,18 @@ fn run_after_init<W: Write>(
                 )?;
                 sessions.insert(key, managed);
             }
-            for managed in sessions
-                .values_mut()
-                .filter(|s| !s.active && s.symbol_job.is_none())
-            {
+            for managed in sessions.values_mut() {
+                submit_symbols(
+                    managed,
+                    &symbols,
+                    &symbol_cache,
+                    symbol_search,
+                    &mut next_job,
+                )?;
+            }
+            for managed in sessions.values_mut().filter(|s| {
+                !s.active && s.symbol_job.is_none() && Instant::now() >= s.symbol_retry_at
+            }) {
                 let response = managed
                     .session
                     .request("activate", serde_json::Map::new())?;
@@ -733,13 +760,54 @@ fn run_after_init<W: Write>(
             }
         }
         while let Some((job, result)) = symbols.try_result() {
-            let Some(managed) = sessions.values_mut().find(|s| s.symbol_job == Some(job)) else {
+            let Some((&(pid, _), managed)) =
+                sessions.iter_mut().find(|(_, s)| s.symbol_job == Some(job))
+            else {
                 continue;
             };
             managed.symbol_job = None;
-            let prepared = result?;
-            let fields = serde_json::from_value(json!({"symbols":prepared})).unwrap();
-            managed.session.request_required("prepareSymbols", fields)?;
+            let mut prepared = Vec::new();
+            for resolution in result {
+                match resolution {
+                    Ok(value) => {
+                        if value["missing"] == true {
+                            crate::diagnostics::emit(
+                                "info",
+                                "symbol_absent",
+                                "resolve_symbol",
+                                &format!(
+                                    "{}!{} is absent from the matching PDB",
+                                    value["module"], value["name"]
+                                ),
+                                Some(pid),
+                            );
+                        }
+                        prepared.push(value);
+                    }
+                    Err(error) => {
+                        managed.symbol_retry_at = Instant::now() + Duration::from_secs(5);
+                        crate::diagnostics::emit(
+                            "warning",
+                            "symbol_unavailable",
+                            "resolve_symbol",
+                            &error,
+                            Some(pid),
+                        );
+                    }
+                }
+            }
+            if !prepared.is_empty() {
+                let fields = serde_json::from_value(json!({"symbols":prepared})).unwrap();
+                let response = managed.session.request_required("prepareSymbols", fields)?;
+                queue_symbols(
+                    managed,
+                    &response,
+                    &symbols,
+                    &symbol_cache,
+                    symbol_search,
+                    &mut next_job,
+                )?;
+            }
             if managed.active {
                 continue;
             }

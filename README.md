@@ -5,7 +5,7 @@ discovery, injection, settings, exact symbols and process ownership; a C++ agent
 exposes the native ABI and pinned MinHook-Detours backend. Behavior, effects,
 animations and settings semantics belong to add-ons.
 
-The foundation prototype is version 0.2.0 / SDK ABI 2. Existing ABI 1 add-ons
+The foundation prototype is version 0.2.1 / SDK ABI 2. Existing ABI 1 add-ons
 require a port; Windhawk mods are not automatically compatible. This prototype
 does not alter the Desktop launch scope or settle the long-term engine choice
 in MyWallpaper's decision ledger.
@@ -27,6 +27,11 @@ in MyWallpaper's decision ledger.
 - Matching x86, x64 and ARM64 build/package paths. A matching helper performs
   cross-architecture injection while the original companion remains the owner.
 - Shared runtime and installed CMake SDK; add-ons need not copy the engine.
+
+The [creator guide](sdk/README.md) includes an independently built example,
+MyWallpaper manifest and native build configuration, reusable fixture tests and
+runtime installation. The [qualification record](docs/CREATOR-INTEGRATION.md)
+describes this isolated implementation and its limits.
 
 There is no visual taskbar framework, sandbox or permission catalogue. Add-ons
 are native DLLs with the user's process privileges and can use Windows APIs.
@@ -87,6 +92,11 @@ during active settings/message callbacks is prepared without reactivating the
 instance. Rejected settings do not become the accepted snapshot; explicitly retry
 after preparation. Finding an exact address does not establish the function's ABI
 or semantic stability across Windows builds; those remain add-on responsibilities.
+
+An identity-verified PDB can establish exact symbol absence and permit an
+add-on-owned fallback. Download, identity and I/O failures remain errors, emit
+nonfatal diagnostics and retry after five seconds. Successful lookups in a batch
+are delivered even when another lookup fails; unrelated effects remain active.
 
 ```powershell
 companion.exe symbol --module C:/Windows/System32/ntdll.dll --name RtlpAllocateHeap --cache C:/Temp/mw-symbols

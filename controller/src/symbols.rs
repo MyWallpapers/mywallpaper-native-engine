@@ -59,7 +59,14 @@ pub(crate) fn resolve(
             }
         }
     }
-    let rva = lookup(request, cache, search)?;
+    let Some(rva) = lookup(request, cache, search)? else {
+        // Only a completed search of an identity-verified PDB establishes
+        // absence. I/O and identity failures never become negative cache hits.
+        let mut prepared = serde_json::to_value(request).map_err(|e| e.to_string())?;
+        prepared["missing"] = true.into();
+        prepared["cacheHit"] = false.into();
+        return Ok(prepared);
+    };
     std::fs::create_dir_all(cache).map_err(|e| format!("cannot create symbol cache: {e}"))?;
     let hit = CachedSymbol {
         schema: 1,
@@ -107,7 +114,11 @@ fn pdb_server_key(request: &SymbolRequest) -> Result<String, String> {
 }
 
 #[cfg(windows)]
-fn lookup(request: &SymbolRequest, cache: &Path, search: Option<&str>) -> Result<u64, String> {
+fn lookup(
+    request: &SymbolRequest,
+    cache: &Path,
+    search: Option<&str>,
+) -> Result<Option<u64>, String> {
     use std::mem::size_of;
     use std::sync::Mutex;
     use windows::core::{GUID, PCWSTR};
@@ -215,8 +226,23 @@ fn lookup(request: &SymbolRequest, cache: &Path, search: Option<&str>) -> Result
         let mut symbol = SYMBOL_INFO_PACKAGEW::default();
         symbol.si.SizeOfStruct = size_of::<SYMBOL_INFOW>() as u32;
         symbol.si.MaxNameLen = (symbol.name.len() + 1) as u32;
-        SymFromNameW(process, PCWSTR(query.as_ptr()), &mut symbol.si)
-            .map_err(|_| format!("exact PDB symbol not found: {}", request.name))?;
+        if let Err(error) = SymFromNameW(process, PCWSTR(query.as_ptr()), &mut symbol.si) {
+            use windows::Win32::Foundation::{
+                ERROR_MOD_NOT_FOUND, ERROR_NOT_FOUND, ERROR_PROC_NOT_FOUND,
+            };
+            // The exact PDB has already been validated above. Only DbgHelp's
+            // not-found results establish absence; other failures stay errors.
+            if [ERROR_MOD_NOT_FOUND, ERROR_NOT_FOUND, ERROR_PROC_NOT_FOUND]
+                .iter()
+                .any(|code| error.code() == code.to_hresult())
+            {
+                return Ok(None);
+            }
+            return Err(format!(
+                "exact symbol lookup failed for {}: {error}",
+                request.name
+            ));
+        }
         if symbol.si.NameLen as usize > symbol.name.len() {
             return Err("symbol name is too long".to_owned());
         }
@@ -228,20 +254,20 @@ fn lookup(request: &SymbolRequest, cache: &Path, search: Option<&str>) -> Result
         if name != request.name {
             return Err(format!("exact symbol name mismatch: {name}"));
         }
-        let rva = symbol
-            .si
-            .Address
+        let address = symbol.si.Address;
+        let module_base = symbol.si.ModBase;
+        let rva = address
             .checked_sub(base)
             .ok_or("symbol is below module base")?;
-        if rva >= request.size as u64 || symbol.si.ModBase != base {
+        if rva >= request.size as u64 || module_base != base {
             return Err("symbol is outside its module".to_owned());
         }
-        Ok(rva)
+        Ok(Some(rva))
     }
 }
 
 #[cfg(not(windows))]
-fn lookup(_: &SymbolRequest, _: &Path, _: Option<&str>) -> Result<u64, String> {
+fn lookup(_: &SymbolRequest, _: &Path, _: Option<&str>) -> Result<Option<u64>, String> {
     Err("PDB resolution requires Windows".to_owned())
 }
 
@@ -249,7 +275,7 @@ fn lookup(_: &SymbolRequest, _: &Path, _: Option<&str>) -> Result<u64, String> {
 /// while a symbol server is slow; it never waits for this thread on process exit.
 pub(crate) struct Worker {
     sender: std::sync::mpsc::SyncSender<(u64, Vec<SymbolRequest>, PathBuf, Option<String>)>,
-    receiver: std::sync::mpsc::Receiver<(u64, Result<Vec<Value>, String>)>,
+    receiver: std::sync::mpsc::Receiver<(u64, Vec<Result<Value, String>>)>,
 }
 impl Worker {
     pub(crate) fn new() -> Self {
@@ -260,7 +286,10 @@ impl Worker {
             while let Ok((key, requests, cache, search)) = jobs.recv() {
                 let prepared = requests
                     .iter()
-                    .map(|r| resolve(r, &cache, search.as_deref()))
+                    .map(|r| {
+                        resolve(r, &cache, search.as_deref())
+                            .map_err(|e| format!("{}!{}: {e}", r.module, r.name))
+                    })
                     .collect();
                 if results.send((key, prepared)).is_err() {
                     break;
@@ -286,7 +315,7 @@ impl Worker {
             }
         }
     }
-    pub(crate) fn try_result(&self) -> Option<(u64, Result<Vec<Value>, String>)> {
+    pub(crate) fn try_result(&self) -> Option<(u64, Vec<Result<Value, String>>)> {
         self.receiver.try_recv().ok()
     }
 }

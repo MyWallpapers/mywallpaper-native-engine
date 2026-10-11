@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(MyWallpaperNativeEngine VERSION 0.2.0 LANGUAGES C CXX)
+project(MyWallpaperNativeEngine VERSION 0.2.1 LANGUAGES C CXX)
 
 set(CMAKE_SUPPRESS_REGENERATION ON)
 if(NOT WIN32 OR NOT MSVC)

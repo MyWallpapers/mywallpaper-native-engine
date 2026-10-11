@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process;
-use std::time::Duration;
 
+mod diagnostics;
 #[cfg(windows)]
 mod launch;
 mod pe;
@@ -13,9 +13,10 @@ mod process_v2;
 mod symbol_download;
 mod symbols;
 
-const PIPE_IO_TIMEOUT: Duration = Duration::from_secs(10);
-const PIPE_NAME_CAPACITY: usize = 192;
-const PIPE_PREFIX: &str = r"\\.\pipe\";
+mod wire_paths;
+use wire_paths::canonical_pipe_path;
+#[cfg(test)]
+use wire_paths::PIPE_NAME_CAPACITY;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -188,33 +189,6 @@ fn parse_command(args: &[String]) -> Result<Command, String> {
     }
 }
 
-fn canonical_pipe_path(name: &str) -> Result<String, String> {
-    let suffix = if name
-        .get(..PIPE_PREFIX.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(PIPE_PREFIX))
-    {
-        &name[PIPE_PREFIX.len()..]
-    } else {
-        name
-    };
-    if suffix.is_empty()
-        || suffix.contains(['\\', '/'])
-        || suffix.chars().any(|ch| ch.is_control() || ch == ':')
-    {
-        return Err(
-            "--pipe must be a pipe name, optionally prefixed with \\\\.\\pipe\\".to_owned(),
-        );
-    }
-    let full = format!("{PIPE_PREFIX}{suffix}");
-    if full.encode_utf16().count() + 1 > PIPE_NAME_CAPACITY {
-        return Err(format!(
-            "--pipe exceeds the {max}-character bootstrap limit",
-            max = PIPE_NAME_CAPACITY - 1
-        ));
-    }
-    Ok(full)
-}
-
 fn request_id(value: &Value) -> Result<Value, String> {
     let id = value
         .as_object()
@@ -276,8 +250,11 @@ fn execute(command: Command) -> Result<String, String> {
             let module = module.canonicalize().map_err(|e| e.to_string())?;
             let bytes = std::fs::read(&module).map_err(|e| e.to_string())?;
             let request = pe::Image::parse(&bytes)?.symbol_request(&module, &name)?;
-            serde_json::to_string(&symbols::resolve(&request, &cache, search.as_deref())?)
-                .map_err(|e| e.to_string())
+            let prepared = symbols::resolve(&request, &cache, search.as_deref())?;
+            if prepared["missing"] == true {
+                return Err(format!("exact PDB symbol not found: {}", request.name));
+            }
+            serde_json::to_string(&prepared).map_err(|e| e.to_string())
         }
         Command::Identity { pid } => {
             let identity = platform::identity(pid)?;

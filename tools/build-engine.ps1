@@ -34,7 +34,10 @@ function Invoke-Logged([string]$Executable, [string[]]$Arguments, [string]$Log) 
         throw "$Executable failed; see $Log"
     }
 }
-$manifest = @{ schemaVersion = 1; engineVersion = '0.2.0'; abiVersion = 2; architectures = @{} }
+$packageText = Get-Content -LiteralPath (Join-Path $repository 'controller\Cargo.toml') -Raw
+$engineVersion = [regex]::Match($packageText, '(?m)^version = "([^"]+)"').Groups[1].Value
+if (-not $engineVersion) { throw 'Engine package version is missing.' }
+$manifest = @{ schemaVersion = 1; engineVersion = $engineVersion; abiVersion = 2; architectures = @{} }
 foreach ($architecture in $Architectures) {
     $build = Join-Path $buildRootAbsolute $architecture
     New-Item -ItemType Directory -Path $build -Force | Out-Null
@@ -52,11 +55,15 @@ foreach ($architecture in $Architectures) {
     New-Item -ItemType Directory -Path $output -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $build 'bin\mw-native-agent.dll') -Destination $output
     Copy-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR "$target\release\companion.exe") -Destination $output
+    Copy-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR "$target\release\mw_native_runtime.dll") -Destination (Join-Path $output 'mw-native-runtime.dll')
     Invoke-Logged $cmake @('--install',$build,'--prefix',(Join-Path $runtimeAbsolute 'sdk')) (Join-Path $build 'sdk-install.log')
     if ($Test) {
         $consumer = Join-Path $build 'sdk-consumer'
         Invoke-Logged $cmake @('-S',(Join-Path $repository 'tests\sdk-consumer'),'-B',$consumer,'-G','Ninja','-DCMAKE_BUILD_TYPE=Release',"-DCMAKE_PREFIX_PATH=$(Join-Path $runtimeAbsolute 'sdk')") (Join-Path $build 'sdk-consumer-configure.log')
         Invoke-Logged $cmake @('--build',$consumer) (Join-Path $build 'sdk-consumer-build.log')
+        $example = Join-Path $build 'sdk-example'
+        Invoke-Logged $cmake @('-S',(Join-Path $runtimeAbsolute 'sdk\examples\settings-hook'),'-B',$example,'-G','Ninja','-DCMAKE_BUILD_TYPE=Release',"-DCMAKE_PREFIX_PATH=$(Join-Path $runtimeAbsolute 'sdk')") (Join-Path $build 'sdk-example-configure.log')
+        Invoke-Logged $cmake @('--build',$example,'--parallel','4') (Join-Path $build 'sdk-example-build.log')
     }
     Copy-Item -LiteralPath (Join-Path $build 'bin\notices') -Destination $output -Recurse -Force
     Copy-Item -LiteralPath (Join-Path $build 'bin\THIRD_PARTY_NOTICES.md') -Destination $output
@@ -64,6 +71,7 @@ foreach ($architecture in $Architectures) {
     $manifest.architectures[$architecture] = @{
         companionSha256 = (Get-FileHash -LiteralPath (Join-Path $output 'companion.exe')).Hash.ToLowerInvariant()
         agentSha256 = (Get-FileHash -LiteralPath (Join-Path $output 'mw-native-agent.dll')).Hash.ToLowerInvariant()
+        controllerSha256 = (Get-FileHash -LiteralPath (Join-Path $output 'mw-native-runtime.dll')).Hash.ToLowerInvariant()
     }
     if ($Test) {
         $nativeOs = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
@@ -76,6 +84,15 @@ foreach ($architecture in $Architectures) {
     }
     Write-Host "Built $architecture into $output"
 }
+$sdkRoot = Join-Path $runtimeAbsolute 'sdk'
+$sdkFiles = @{}
+Get-ChildItem -LiteralPath $sdkRoot -File -Recurse | Where-Object Name -ne 'sdk-manifest.json' | ForEach-Object {
+    $relative = [IO.Path]::GetRelativePath($sdkRoot, $_.FullName).Replace('\','/')
+    $sdkFiles[$relative] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+[IO.File]::WriteAllText((Join-Path $sdkRoot 'sdk-manifest.json'),
+    (@{schemaVersion=1; engineVersion=$engineVersion; abiVersion=2; files=$sdkFiles} | ConvertTo-Json -Depth 8),
+    [Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $runtimeAbsolute 'engine-manifest.json'),
     ($manifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath (Join-Path $repository 'LICENSE'),(Join-Path $repository 'THIRD_PARTY_NOTICES.md') -Destination $runtimeAbsolute

@@ -1,12 +1,18 @@
 [package]
 name = "mywallpaper-native-engine"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 publish = false
 
 [[bin]]
 name = "companion"
 path = "src/main.rs"
+
+[lib]
+name = "mw_native_runtime"
+path = "src/runtime.rs"
+crate-type = ["cdylib"]
+test = false
 
 [workspace]
 members = ["."]

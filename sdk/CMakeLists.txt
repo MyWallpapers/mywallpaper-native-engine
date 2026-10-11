@@ -20,13 +20,24 @@ install(DIRECTORY "${MW_NATIVE_ENGINE_ROOT}/third_party/nlohmann" DESTINATION in
 install(EXPORT MyWallpaperNativeEngineTargets NAMESPACE MyWallpaperNativeEngine::
     DESTINATION lib/cmake/MyWallpaperNativeEngine)
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/MyWallpaperNativeEngineConfig.cmake"
-    "include(\"\${CMAKE_CURRENT_LIST_DIR}/MyWallpaperNativeEngineTargets.cmake\")\n")
+    "include(\"\${CMAKE_CURRENT_LIST_DIR}/MyWallpaperNativeEngineTargets.cmake\")\ninclude(\"\${CMAKE_CURRENT_LIST_DIR}/MyWallpaperNativeAddon.cmake\")\n")
 write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/MyWallpaperNativeEngineConfigVersion.cmake"
-    VERSION 0.2.0 COMPATIBILITY SameMinorVersion ARCH_INDEPENDENT)
+    VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion ARCH_INDEPENDENT)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/MyWallpaperNativeEngineConfig.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/MyWallpaperNativeEngineConfigVersion.cmake"
     DESTINATION lib/cmake/MyWallpaperNativeEngine)
-install(FILES "${MW_NATIVE_ENGINE_ROOT}/LICENSE" "${MW_NATIVE_ENGINE_ROOT}/THIRD_PARTY_NOTICES.md"
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/MyWallpaperNativeAddon.cmake"
+    DESTINATION lib/cmake/MyWallpaperNativeEngine)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/launcher.cpp"
+    DESTINATION share/mywallpaper-native-sdk)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/examples/" DESTINATION examples)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tools/" DESTINATION tools)
+install(FILES "${MW_NATIVE_ENGINE_ROOT}/LICENSE" "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
     DESTINATION .)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md" DESTINATION .)
 install(FILES "${MW_NATIVE_ENGINE_ROOT}/third_party/nlohmann/LICENSE.MIT"
     DESTINATION notices RENAME nlohmann-json-LICENSE.MIT)
+install(FILES "${MW_NATIVE_ENGINE_ROOT}/LICENSE" "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+    DESTINATION examples/settings-hook)
+install(FILES "${MW_NATIVE_ENGINE_ROOT}/third_party/nlohmann/LICENSE.MIT"
+    DESTINATION examples/settings-hook/notices RENAME nlohmann-json-LICENSE.MIT)

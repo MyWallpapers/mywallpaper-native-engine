@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.24)
+project(NativeSettingsHook LANGUAGES CXX)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+find_package(MyWallpaperNativeEngine 0.2.1 CONFIG REQUIRED)
+if(CMAKE_GENERATOR_PLATFORM MATCHES "ARM64" OR CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "ARM64")
+    set(MW_ARCH windows-arm64)
+elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(MW_ARCH windows-x86)
+else()
+    set(MW_ARCH windows-x86_64)
+endif()
+mywallpaper_native_addon(settings_hook
+    SOURCES addon.cpp DESCRIPTOR "${CMAKE_CURRENT_SOURCE_DIR}/mywallpaper-native-engine.json"
+    BUNDLE_DIRECTORY "${CMAKE_BINARY_DIR}/dist/native/${MW_ARCH}")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/manifest.json" manifest)
+string(JSON manifest SET "${manifest}" native companion entries
+    "{\"${MW_ARCH}\":\"native/${MW_ARCH}/companion.exe\"}")
+file(WRITE "${CMAKE_BINARY_DIR}/dist/manifest.json" "${manifest}\n")
+add_executable(mw_sdk_fixture fixture.cpp)
+target_link_libraries(mw_sdk_fixture PRIVATE MyWallpaperNativeEngine::SDK psapi)
+target_compile_options(mw_sdk_fixture PRIVATE /Ob0 /Z7)
+target_link_options(mw_sdk_fixture PRIVATE /DEBUG:FULL /OPT:NOICF /FUNCTIONPADMIN:16)
+set_target_properties(mw_sdk_fixture PROPERTIES OUTPUT_NAME mw-sdk-fixture)

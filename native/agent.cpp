@@ -681,7 +681,7 @@ MwStatus CleanupHooks(AddonState& addon, std::string* error, bool remove = true)
         const MH_STATUS status = remove
             ? mw::hooks::Remove(reinterpret_cast<ULONG_PTR>(&addon), found->second.target)
             : mw::hooks::Disable(reinterpret_cast<ULONG_PTR>(&addon), found->second.target);
-        if (status == MH_OK) {
+        if (status == MH_OK || (!remove && status == MH_ERROR_DISABLED)) {
             if (remove) {
                 addon.hook_ids.erase(id);
                 runtime.hooks.erase(found);

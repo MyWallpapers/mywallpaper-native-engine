@@ -1,4 +1,4 @@
-use super::{canonical_pipe_path, PIPE_IO_TIMEOUT, PIPE_NAME_CAPACITY};
+use crate::wire_paths::{canonical_pipe_path, PIPE_IO_TIMEOUT, PIPE_NAME_CAPACITY};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

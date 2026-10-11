@@ -1,0 +1,12 @@
+{
+  "runtime": "native-v1",
+  "name": "Native hook SDK example",
+  "description": "A native hook with live MyWallpaper settings and cooperative stop, targeting its own test process.",
+  "version": "0.1.0",
+  "deviceSettingsVersion": "1",
+  "settings": [
+    {"id": "enabled", "type": "boolean", "label": "Enable effect", "default": true, "scope": "device"},
+    {"id": "delta", "type": "number", "label": "Added value", "default": 7, "min": -100, "max": 100, "step": 1, "scope": "device"}
+  ],
+  "native": {"companion": {"runtime": "process-v2", "entries": {"windows-x86_64": "native/out/windows-x86_64/companion.exe"}}}
+}

@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 2,
+  "addon": {"library": "addon.dll"},
+  "agent": "mw-native-agent.dll",
+  "symbols": {"searchPath": ""},
+  "target": {"imageName": "mw-sdk-fixture.exe", "match": "single"}
+}
