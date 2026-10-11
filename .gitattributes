@@ -1,0 +1,6 @@
+* text=auto eol=lf
+
+# Keep vendored upstream bytes exact; SHA-256 manifests and notices refer to raw files.
+third_party/minhook-detours/** -text
+third_party/nlohmann/** -text
+third_party/rust-licenses/** -text

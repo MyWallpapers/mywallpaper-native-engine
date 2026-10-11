@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "addon": {
+    "library": "mywallpaper-addon-taskbar-configurator.dll"
+  },
+  "agent": "mw-native-agent.dll",
+  "target": {
+    "imageName": "explorer.exe",
+    "windowClass": "Shell_TrayWnd"
+  }
+}

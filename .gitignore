@@ -1,0 +1,4 @@
+build*/
+controller/target/
+*.user
+*.suo

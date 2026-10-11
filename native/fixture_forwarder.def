@@ -1,0 +1,3 @@
+LIBRARY mw_fixture_forwarder
+EXPORTS
+    MwFixtureForwarded=mw_fixture_module.MwFixtureLate

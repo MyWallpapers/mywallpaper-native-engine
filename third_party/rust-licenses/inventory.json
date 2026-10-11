@@ -1,0 +1,182 @@
+[
+  {
+    "Crate": "block-buffer-0.10.4",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "cfg-if-1.0.5",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "cpufeatures-0.2.17",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "crypto-common-0.1.7",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "digest-0.10.7",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "generic-array-0.14.7",
+    "License": "MIT",
+    "Files": "LICENSE"
+  },
+  {
+    "Crate": "itoa-1.0.18",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "libc-0.2.190",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "memchr-2.8.3",
+    "License": "Unlicense OR MIT",
+    "Files": "COPYING, LICENSE-MIT, UNLICENSE"
+  },
+  {
+    "Crate": "proc-macro2-1.0.107",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "quote-1.0.47",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "serde-1.0.228",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "serde_core-1.0.228",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "serde_derive-1.0.228",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "serde_json-1.0.149",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "sha2-0.10.9",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "syn-2.0.119",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "typenum-1.20.1",
+    "License": "MIT OR Apache-2.0",
+    "Files": "LICENSE, LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "unicode-ident-1.0.26",
+    "License": "(MIT OR Apache-2.0) AND Unicode-3.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT, LICENSE-UNICODE"
+  },
+  {
+    "Crate": "version_check-0.9.5",
+    "License": "MIT/Apache-2.0",
+    "Files": "LICENSE-APACHE, LICENSE-MIT"
+  },
+  {
+    "Crate": "windows-0.58.0",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows_aarch64_gnullvm-0.52.6",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows_aarch64_msvc-0.52.6",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows_i686_gnu-0.52.6",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows_i686_gnullvm-0.52.6",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows_i686_msvc-0.52.6",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows_x86_64_gnu-0.52.6",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows_x86_64_gnullvm-0.52.6",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows_x86_64_msvc-0.52.6",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows-core-0.58.0",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows-implement-0.58.0",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows-interface-0.58.0",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows-result-0.2.0",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows-strings-0.1.0",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "windows-targets-0.52.6",
+    "License": "MIT OR Apache-2.0",
+    "Files": "license-apache-2.0, license-mit"
+  },
+  {
+    "Crate": "zmij-1.0.23",
+    "License": "MIT",
+    "Files": "LICENSE-MIT"
+  }
+]
