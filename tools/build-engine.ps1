@@ -27,6 +27,7 @@ $env:RUSTC = & rustup which --toolchain $RustToolchain rustc
 $env:RUSTUP_TOOLCHAIN = $RustToolchain
 $env:CARGO_TARGET_DIR = Join-Path $buildRootAbsolute 'rust'
 $env:CARGO_INCREMENTAL = '0'
+$env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static".Trim()
 function Invoke-Logged([string]$Executable, [string[]]$Arguments, [string]$Log) {
     & $Executable @Arguments *> $Log
     if ($LASTEXITCODE -ne 0) {

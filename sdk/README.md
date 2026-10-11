@@ -24,7 +24,9 @@ descriptor under `native/out/windows-x86_64`. The launcher loads the shared
 `x64/mw-native-runtime.dll` inside its own process: no second controller process
 and no engine implementation copied into the add-on. The runtime also contains
 the agent and standalone companion CLI. Installation is once per machine/user,
-not once per add-on. `MW_NATIVE_ENGINE_HOME` or the descriptor's absolute
+not once per add-on. The packaged runtime and example link the C runtime
+statically, so they require no separate Visual C++ redistributable installer.
+`MW_NATIVE_ENGINE_HOME` or the descriptor's absolute
 `engineDirectory` selects a runtime; the default is
 `%LOCALAPPDATA%\MyWallpaper\NativeEngine`.
 
