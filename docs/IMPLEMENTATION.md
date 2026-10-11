@@ -80,10 +80,10 @@ Rust 1.94.1. The tests used dedicated child fixtures, never live Explorer.
 | Installed SDK consumer | Compiled | Compiled |
 | Foundation integration | Passed, including cross-architecture injection | Passed |
 | Same-artifact start/stop cycles after warm-up | 1,000 | 1,000 |
-| Private bytes before / after cycles | 1,146,880 / 1,146,880 | 1,515,520 / 1,519,616 |
+| Private bytes before / after cycles | 1,155,072 / 1,155,072 | 1,515,520 / 1,519,616 |
 | Retained hook records before / after | 1 / 1 | 1 / 1 |
 | Trampoline region bytes before / after | 65,536 / 65,536 | 65,536 / 65,536 |
-| Other instance settings while one callback blocked | 31 ms | 31 ms |
+| Other instance settings while one callback blocked | 32 ms | 31 ms |
 
 The 4 KiB x86 variation is an observed whole-process private-memory change, not
 evidence of an accumulating hook allocation. The assertions verify stable hook
@@ -131,6 +131,10 @@ The real Windows symbol probe is recorded separately in
 - A saturated symbol job queue defers and retries preparation instead of
   terminating a companion with many matching processes. Its bounded queue and
   successful retry/disconnection behavior are covered by a Rust regression test.
+- Traced the no-hook startup/owner-loss path. A successful start is marked active
+  before cooperative cleanup so that an empty hook list does not skip the add-on's
+  stop callback. A dedicated fixture owns and releases a native event resource
+  while its start callback is blocked; its owner-loss regression passes on x64.
 - Updated the original session test's rejection expectation to match the existing
   wire contract: recoverable active settings rejection is an stderr diagnostic,
   not a terminal host error. Added scenario tests for new behavior rather than

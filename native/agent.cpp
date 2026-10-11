@@ -723,12 +723,14 @@ MwStatus CallStart(AddonState& addon, std::string* error) {
         }
     }
     if (status == MW_OK) {
+        // Start may own resources without any engine hook. Mark it active
+        // before owner-loss cleanup so Stop cannot mistake it for a no-op.
+        addon.state = AddonStateKind::Active;
         if (!addon.owner_alive.load(std::memory_order_acquire)) {
             (void)CallStop(addon, false, error);
             if (error) *error = "owner exited while start callback was running";
             return MW_ERROR_STATE;
         }
-        addon.state = AddonStateKind::Active;
         addon.last_code = MW_OK;
         addon.last_error.clear();
         return MW_OK;

@@ -13,6 +13,7 @@ struct Instance {
     std::atomic_int delta{0};
     uint64_t hook = 0;
     int slot = -1;
+    HANDLE resource = nullptr;
 };
 struct Slot {
     void* original = nullptr;
@@ -35,6 +36,19 @@ Json Device(const char* text) {
     const Json full = Json::parse(text ? text : "{}");
     return full.contains("deviceSettings") ? full["deviceSettings"] : full;
 }
+MwStatus WaitForGate(const std::string& event) {
+    if (event.empty()) return MW_OK;
+    std::wstring wide(event.begin(), event.end());
+    HANDLE release = OpenEventW(SYNCHRONIZE, FALSE, wide.c_str());
+    if (!release) return MW_ERROR_ARGUMENT;
+    const std::string entered_name = event + "-entered";
+    std::wstring entered_wide(entered_name.begin(), entered_name.end());
+    HANDLE entered = OpenEventW(EVENT_MODIFY_STATE, FALSE, entered_wide.c_str());
+    if (entered) { SetEvent(entered); CloseHandle(entered); }
+    const DWORD result = WaitForSingleObject(release, 15000);
+    CloseHandle(release);
+    return result == WAIT_OBJECT_0 ? MW_OK : MW_ERROR_ADDON;
+}
 MwStatus MW_CALL Create(const MwHostApi* host, const char*, void** out) {
     if (!host || !out) return MW_ERROR_ARGUMENT;
     auto* instance = new Instance();
@@ -45,6 +59,14 @@ MwStatus MW_CALL Create(const MwHostApi* host, const char*, void** out) {
 MwStatus MW_CALL Start(void* context, const char* text) {
     auto* instance = static_cast<Instance*>(context);
     const Json settings = Device(text);
+    if (settings.value("noHooks", false)) {
+        const std::string name = settings.value("resourceEvent", std::string());
+        const std::wstring wide(name.begin(), name.end());
+        instance->resource = OpenEventW(EVENT_MODIFY_STATE, FALSE, wide.c_str());
+        if (!instance->resource) return MW_ERROR_ARGUMENT;
+        SetEvent(instance->resource);
+        return WaitForGate(settings.value("startBlockEvent", std::string()));
+    }
     const std::string target_name = settings.value("target", std::string("compute"));
     const int index = target_name == "private" ? 2 : target_name == "secondary" ? 1 : 0;
     void* target = nullptr;
@@ -76,18 +98,8 @@ MwStatus MW_CALL Settings(void* context, const char* text) {
             L"mw-native-fixture.exe", "MwFixturePrivateCompute", &target);
         if (status != MW_OK) return status;
     }
-    const std::string event = settings.value("blockEvent", std::string());
-    if (!event.empty()) {
-        std::wstring wide(event.begin(), event.end());
-        HANDLE release = OpenEventW(SYNCHRONIZE, FALSE, wide.c_str());
-        if (!release) return MW_ERROR_ARGUMENT;
-        const std::string entered_name = event + "-entered";
-        std::wstring entered_wide(entered_name.begin(), entered_name.end());
-        HANDLE entered = OpenEventW(EVENT_MODIFY_STATE, FALSE, entered_wide.c_str());
-        if (entered) { SetEvent(entered); CloseHandle(entered); }
-        WaitForSingleObject(release, 15000); // Test harness can always release or kill its own fixture.
-        CloseHandle(release);
-    }
+    const MwStatus gate = WaitForGate(settings.value("blockEvent", std::string()));
+    if (gate != MW_OK) return gate;
     if (settings.value("target", std::string("compute")) !=
         (instance->slot == 2 ? "private" : instance->slot == 1 ? "secondary" : "compute")) return MW_ERROR_ARGUMENT;
     instance->delta = settings.value("delta", 1);
@@ -95,6 +107,11 @@ MwStatus MW_CALL Settings(void* context, const char* text) {
 }
 MwStatus MW_CALL Stop(void* context) {
     auto* instance = static_cast<Instance*>(context);
+    if (instance->resource) {
+        ResetEvent(instance->resource);
+        CloseHandle(instance->resource);
+        instance->resource = nullptr;
+    }
     if (instance->slot < 0) return MW_OK;
     std::lock_guard lock(slot_mutex);
     const MwStatus status = instance->host->hook_remove(instance->host->addon_context, instance->hook);

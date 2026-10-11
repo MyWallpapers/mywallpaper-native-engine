@@ -219,6 +219,21 @@ def main():
         assert fixture.sample()["secondaryValue"]==20
         results["instances"]={"sameDllMultipleContexts":True,"otherCallbackSeconds":round(other_latency,3),
             "ownerDeathBypassesBlockedCallback":True,"stopRestoresBothEffects":True,"lateSymbolsPreparedWhileActive":True}
+        # Successful start without hooks must still release its own resources
+        # when the owner disappears while that callback is running.
+        startup_gate="Local\\mw-startup-"+uuid.uuid4().hex
+        startup_release=K.CreateEventW(None,True,False,startup_gate)
+        startup_entered=K.CreateEventW(None,True,False,startup_gate+"-entered")
+        resource_name="Local\\mw-resource-"+uuid.uuid4().hex
+        resource=K.CreateEventW(None,True,False,resource_name)
+        events.extend([startup_release,startup_entered,resource])
+        no_hooks=tracked(companion,a,{"noHooks":True,"resourceEvent":resource_name,"startBlockEvent":startup_gate},
+            "no-hooks-context",root/"scratch-no-hooks")
+        assert K.WaitForSingleObject(startup_entered,3000)==0
+        assert K.WaitForSingleObject(resource,0)==0
+        no_hooks.kill();K.SetEvent(startup_release)
+        wait_for(lambda:K.WaitForSingleObject(resource,0)==258,"owner death cleans non-hook startup resources")
+        results["instances"]["ownerDeathCleansNoHookStartup"]=True
         fixture.stop()
 
         # Common manager follows all matching processes, then restarts them and
