@@ -1,0 +1,59 @@
+name: Native foundation
+
+on:
+  push:
+    branches: [main, codex/native-engine-foundation]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - architecture: x86
+            target: i686-pc-windows-msvc
+            runner: windows-2025
+          - architecture: arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt --target ${{ matrix.target }}
+      - name: Check Rust formatting
+        run: cargo +1.94.1 fmt --check --manifest-path controller/Cargo.toml
+      - name: Build, package, and run unit tests
+        run: |
+          ./tools/build-engine.ps1 -Architectures '${{ matrix.architecture }}' -BuildRoot "$env:RUNNER_TEMP/native-build" -RuntimeDirectory "$env:RUNNER_TEMP/native-runtime" -Test
+      - name: Qualify native lifecycle and companion
+        run: |
+          python ./tests/run-foundation.py --architecture '${{ matrix.architecture }}' --build "$env:RUNNER_TEMP/native-build/${{ matrix.architecture }}" --companion "$env:RUNNER_TEMP/native-runtime/${{ matrix.architecture }}/companion.exe" | Tee-Object "$env:RUNNER_TEMP/foundation.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Qualify original session scenarios
+        if: matrix.architecture == 'x64'
+        run: |
+          ./tests/run-session-coexistence.ps1 -BuildDirectory "$env:RUNNER_TEMP/native-build/x64" -CompanionPath "$env:RUNNER_TEMP/native-runtime/x64/companion.exe" | Tee-Object "$env:RUNNER_TEMP/session.json"
+      - name: Retain qualification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-foundation-${{ matrix.architecture }}
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/native-build/**/*.log
+            ${{ runner.temp }}/native-runtime/engine-manifest.json
+            ${{ runner.temp }}/foundation.json
+            ${{ runner.temp }}/session.json

@@ -1,11 +1,13 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "engineDirectory": "C:\\Users\\Example\\AppData\\Local\\MyWallpaper\\NativeEngine",
   "addon": {
     "library": "mywallpaper-addon-taskbar-configurator.dll"
   },
   "agent": "mw-native-agent.dll",
   "target": {
     "imageName": "explorer.exe",
-    "windowClass": "Shell_TrayWnd"
+    "windowClass": "Shell_TrayWnd",
+    "match": "single"
   }
 }

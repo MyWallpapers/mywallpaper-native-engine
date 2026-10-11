@@ -31,7 +31,9 @@ function Read-ExactBytes([System.IO.Stream]$Stream, [int]$Count) {
     $bytes = [byte[]]::new($Count)
     $offset = 0
     while ($offset -lt $Count) {
-        $read = $Stream.Read($bytes, $offset, $Count - $offset)
+        $readTask = $Stream.ReadAsync($bytes, $offset, $Count - $offset)
+        if (-not $readTask.Wait(15000)) { throw 'Timed out reading framed test output.' }
+        $read = $readTask.GetAwaiter().GetResult()
         if ($read -le 0) { throw 'Unexpected EOF in framed stream.' }
         $offset += $read
     }
@@ -278,10 +280,9 @@ try {
     Write-WireRecord $sessionB.Process.StandardInput.BaseStream @{
         type = 'settings'; v = 5; layerSettings = @{}; deviceSettings = @{ reject = $true }
     }
-    $settingsError = Read-WireRecord $sessionB.Process.StandardOutput.BaseStream
-    if ($settingsError.type -ne 'error' -or $settingsError.code -ne 'addon_settings_rejected') {
-        throw "Rejected settings did not produce a recoverable error event: $($settingsError | ConvertTo-Json -Compress)"
-    }
+    # Argument rejection is nonterminal and is reported through diagnostics;
+    # a wire error would tell the Desktop host to stop the process.
+    Start-Sleep -Milliseconds 100
     if ($sessionB.Process.HasExited) { throw 'A rejected settings snapshot terminated its companion session.' }
     Wait-ForSample $pipeSuffix 11 22 | Out-Null
 
@@ -329,7 +330,7 @@ try {
     } catch {
         $invalidCallbackFailure = $_.Exception.Message
     }
-    if ($invalidCallbackFailure -notmatch 'callback table entry 2 must point into committed image code') {
+    if ($invalidCallbackFailure -notmatch 'callback table entry 3 must point into committed image code') {
         throw "An image-invalid callback pointer was not rejected before pinning: $invalidCallbackFailure"
     }
     if ((Get-ModuleCount $fixture.Id 'mw-native-invalid-callback-addon.dll') -ne 0) {
@@ -354,8 +355,8 @@ try {
     Write-WireRecord $sessionB.Process.StandardInput.BaseStream @{
         type = 'settings'; v = 5; layerSettings = @{}; deviceSettings = @{ reject = $true }
     }
-    $survivingSettingsError = Read-WireRecord $sessionB.Process.StandardOutput.BaseStream
-    if ($survivingSettingsError.type -ne 'error' -or $sessionB.Process.HasExited) {
+    Start-Sleep -Milliseconds 100
+    if ($sessionB.Process.HasExited) {
         throw 'The independent session stopped responding after the other owner died before pipe setup.'
     }
 
@@ -397,6 +398,10 @@ try {
     }
 
     Stop-Companion $sessionB
+    $rejectionDiagnostic = $sessionB.Stderr.GetAwaiter().GetResult()
+    if (($rejectionDiagnostic | Select-String -AllMatches 'rejected settings; companion remains active').Matches.Count -lt 2) {
+        throw 'Settings rejection callbacks did not run for both sessions.'
+    }
     $sessionB.Process.Dispose()
     Wait-ForSample $pipeSuffix 10 20 | Out-Null
     $final = Get-Process -Id $fixture.Id

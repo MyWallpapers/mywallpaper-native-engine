@@ -29,6 +29,8 @@
 #include <mutex>
 #include <new>
 #include <set>
+#include <sstream>
+#include <iomanip>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -69,11 +71,15 @@ struct AddonState {
     std::string id;
     std::wstring canonical_path;
     std::array<uint8_t, 32> image_sha256{}; // Identity of the permanently resident DLL image.
-    uint32_t owner_pid = 0;
-    uint64_t owner_creation_time = 0;
+    std::atomic_uint32_t owner_pid{0};
+    std::atomic_uint64_t owner_creation_time{0};
+    std::atomic_bool owner_alive{true};
+    std::recursive_mutex lifecycle_mutex;
     HMODULE module = nullptr; // Kept loaded for the rest of the process.
     MwAddonApi api{};
     MwHostApi host{};
+    void* instance_context = nullptr;
+    bool instance_created = false;
     AddonStateKind state = AddonStateKind::Failed;
     MwStatus last_code = MW_OK;
     std::string last_error;
@@ -81,10 +87,14 @@ struct AddonState {
     std::atomic_bool accepting_hooks{false};
     std::set<uint64_t> hook_ids; // Protected by Runtime::backend_mutex.
     std::string backend_diagnostic; // Protected by Runtime::backend_mutex.
+    mutable std::mutex symbols_mutex;
+    std::map<std::pair<std::wstring, std::string>, Json> pending_symbols;
+    std::map<std::pair<std::wstring, std::string>, void*> resolved_symbols;
 };
 
 struct Runtime {
-    std::mutex lifecycle_mutex;
+    std::recursive_mutex registry_mutex; // Registry only; never held across callbacks.
+    std::mutex loader_mutex; // Serialize new images without blocking existing instances.
     std::mutex backend_mutex;
     std::mutex sessions_mutex;
     std::map<std::string, std::unique_ptr<AddonState>, std::less<>> addons;
@@ -378,6 +388,94 @@ MwStatus MW_CALL HostResolveExport(void* context, const wchar_t* module_name,
     return MW_OK;
 }
 
+bool SymbolModuleIdentity(HMODULE module, Json* identity) {
+    if (!module || !identity) return false;
+    const auto* base = reinterpret_cast<const uint8_t*>(module);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < sizeof(*dos) ||
+        dos->e_lfanew > 65536) return false;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    const uint32_t size = nt->OptionalHeader.SizeOfImage;
+    const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
+    if (directory.VirtualAddress >= size || directory.Size > size - directory.VirtualAddress)
+        return false;
+    const auto* debug = reinterpret_cast<const IMAGE_DEBUG_DIRECTORY*>(base + directory.VirtualAddress);
+    for (size_t i = 0; i < directory.Size / sizeof(*debug); ++i) {
+        if (debug[i].Type != IMAGE_DEBUG_TYPE_CODEVIEW || debug[i].SizeOfData < 25 ||
+            debug[i].AddressOfRawData >= size ||
+            debug[i].SizeOfData > size - debug[i].AddressOfRawData) continue;
+        const uint8_t* cv = base + debug[i].AddressOfRawData;
+        if (std::memcmp(cv, "RSDS", 4) != 0) continue;
+        uint32_t age = 0;
+        std::memcpy(&age, cv + 20, sizeof(age));
+        const char* pdb_path = reinterpret_cast<const char*>(cv + 24);
+        const size_t pdb_length = strnlen_s(pdb_path, debug[i].SizeOfData - 24);
+        if (pdb_length == 0 || pdb_length == debug[i].SizeOfData - 24) return false;
+        const std::string pdb_file = std::filesystem::path(std::string(pdb_path, pdb_length)).filename().string();
+        std::ostringstream guid;
+        for (int byte = 4; byte < 20; ++byte)
+            guid << std::hex << std::setfill('0') << std::setw(2) << unsigned(cv[byte]);
+        std::wstring path(32768, L'\0');
+        const DWORD count = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+        if (!count || count >= path.size()) return false;
+        path.resize(count);
+        *identity = Json{
+            {"path", WideToUtf8(path)}, {"base", reinterpret_cast<uintptr_t>(module)},
+            {"size", size}, {"machine", nt->FileHeader.Machine},
+            {"timestamp", nt->FileHeader.TimeDateStamp}, {"checksum", nt->OptionalHeader.CheckSum},
+            {"pdbGuid", guid.str()}, {"pdbAge", age}, {"pdbFile", pdb_file}
+        };
+        return true;
+    }
+    return false;
+}
+
+bool ExecutableRva(HMODULE module, uint64_t rva) {
+    const auto* base = reinterpret_cast<const uint8_t*>(module);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (rva >= nt->OptionalHeader.SizeOfImage) return false;
+    const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if ((section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) &&
+            rva >= section[i].VirtualAddress &&
+            rva - section[i].VirtualAddress < section[i].Misc.VirtualSize) return true;
+    }
+    return false;
+}
+
+MwStatus MW_CALL HostResolveSymbol(void* context, const wchar_t* module_name,
+    const char* symbol_name, void** target) {
+    AddonState* addon = GetAddonContext(context);
+    if (!addon || !module_name || !*module_name || !symbol_name || !*symbol_name || !target)
+        return MW_ERROR_ARGUMENT;
+    *target = nullptr;
+    const auto key = std::make_pair(LowerPath(module_name), std::string(symbol_name));
+    std::lock_guard symbols_lock(addon->symbols_mutex);
+    const auto resolved = addon->resolved_symbols.find(key);
+    if (resolved != addon->resolved_symbols.end()) {
+        *target = resolved->second;
+        return *target ? MW_OK : MW_ERROR_SYMBOL_NOT_FOUND;
+    }
+    if (addon->pending_symbols.contains(key)) return MW_ERROR_SYMBOL_PENDING;
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(0, module_name, &module)) return MW_ERROR_MODULE_NOT_READY;
+    if (mw::module_lifetime::PinAddress(module).disposition ==
+        mw::module_lifetime::PinDisposition::Failure) {
+        FreeLibrary(module);
+        return MW_ERROR_ADDON;
+    }
+    Json request;
+    const bool identified = SymbolModuleIdentity(module, &request);
+    FreeLibrary(module);
+    if (!identified) return MW_ERROR_SYMBOL_NOT_FOUND;
+    request["module"] = WideToUtf8(module_name);
+    request["name"] = symbol_name;
+    addon->pending_symbols.emplace(key, std::move(request));
+    return MW_ERROR_SYMBOL_PENDING;
+}
+
 MwStatus MW_CALL HostHookCreate(void* context, void* target, void* detour,
     void** original, uint64_t* hook_id_out) {
     AddonState* addon = GetAddonContext(context);
@@ -386,7 +484,8 @@ MwStatus MW_CALL HostHookCreate(void* context, void* target, void* detour,
         reinterpret_cast<uintptr_t>(original) % alignof(void*) != 0) {
         return MW_ERROR_ARGUMENT;
     }
-    if (!addon->accepting_hooks.load(std::memory_order_acquire)) {
+    if (!addon->accepting_hooks.load(std::memory_order_acquire) ||
+        !addon->owner_alive.load(std::memory_order_acquire)) {
         return MW_ERROR_STATE;
     }
     const auto target_pin = mw::module_lifetime::PinAddress(target);
@@ -401,6 +500,7 @@ MwStatus MW_CALL HostHookCreate(void* context, void* target, void* detour,
     }
     std::lock_guard lock(runtime.backend_mutex);
     if (!addon->accepting_hooks.load(std::memory_order_acquire) ||
+        !addon->owner_alive.load(std::memory_order_acquire) ||
         !runtime.hook_backend_ready) {
         return MW_ERROR_STATE;
     }
@@ -449,6 +549,8 @@ MwStatus OperateHook(void* context, uint64_t hook_id, int operation) {
     const char* operation_name = nullptr;
     switch (operation) {
     case 0:
+        if (!addon->accepting_hooks.load(std::memory_order_acquire) ||
+            !addon->owner_alive.load(std::memory_order_acquire)) return MW_ERROR_STATE;
         operation_name = "MH_EnableHookEx";
         backend_status = mw::hooks::Enable(ident, found->second.target);
         if (backend_status == MH_ERROR_ENABLED) {
@@ -505,10 +607,8 @@ Json AddonStatusJson(Runtime& runtime, const AddonState& addon) {
         {"state", StateName(addon.state)},
         {"hookCount", hook_count},
         {"lastCode", addon.last_code},
-        {"ownerPid", addon.owner_pid},
-        {"ownerCreationTime", addon.owner_creation_time},
-        {"ownerPid", addon.owner_pid},
-        {"ownerCreationTime", addon.owner_creation_time},
+        {"ownerPid", addon.owner_pid.load()},
+        {"ownerCreationTime", addon.owner_creation_time.load()},
     };
     if (!addon.last_error.empty()) {
         result["error"] = addon.last_error;
@@ -516,14 +616,30 @@ Json AddonStatusJson(Runtime& runtime, const AddonState& addon) {
     if (!backend_diagnostic.empty()) {
         result["backendDiagnostic"] = std::move(backend_diagnostic);
     }
+    {
+        std::lock_guard symbols_lock(addon.symbols_mutex);
+        result["pendingSymbols"] = Json::array();
+        for (const auto& [key, request] : addon.pending_symbols) {
+            (void)key;
+            result["pendingSymbols"].push_back(request);
+        }
+        result["resolvedSymbolCount"] = addon.resolved_symbols.size();
+    }
     return result;
 }
 
 Json AllAddonStatuses(Runtime& runtime) {
+    std::lock_guard registry_lock(runtime.registry_mutex);
     Json result = Json::array();
     for (const auto& [id, addon] : runtime.addons) {
-        (void)id;
-        result.push_back(AddonStatusJson(runtime, *addon));
+        std::unique_lock instance_lock(addon->lifecycle_mutex, std::try_to_lock);
+        if (instance_lock.owns_lock()) {
+            result.push_back(AddonStatusJson(runtime, *addon));
+        } else {
+            result.push_back(Json{{"addonId", id}, {"state", "busy"},
+                {"ownerPid", addon->owner_pid.load()},
+                {"ownerCreationTime", addon->owner_creation_time.load()}});
+        }
     }
     return result;
 }
@@ -548,6 +664,7 @@ void BuildHostApi(AddonState& addon) {
     addon.host.hook_enable = &HostHookEnable;
     addon.host.hook_disable = &HostHookDisable;
     addon.host.hook_remove = &HostHookRemove;
+    addon.host.resolve_symbol = &HostResolveSymbol;
 }
 
 MwStatus CleanupHooks(AddonState& addon, std::string* error) {
@@ -577,12 +694,28 @@ MwStatus CleanupHooks(AddonState& addon, std::string* error) {
     return first_error;
 }
 
+MwStatus CallStop(AddonState& addon, bool require_active, std::string* error);
+
 MwStatus CallStart(AddonState& addon, std::string* error) {
+    if (!addon.owner_alive.load(std::memory_order_acquire)) return MW_ERROR_STATE;
+    if (!addon.instance_created) {
+        MwStatus created = MW_ERROR_ADDON;
+        try {
+            created = addon.api.create_instance(&addon.host, addon.id.c_str(),
+                &addon.instance_context);
+        } catch (...) { created = MW_ERROR_ADDON; }
+        if (created != MW_OK) {
+            addon.state = AddonStateKind::Failed;
+            if (error != nullptr) *error = CallbackError("create_instance", created);
+            return created;
+        }
+        addon.instance_created = true;
+    }
     addon.accepting_hooks.store(true, std::memory_order_release);
     const std::string settings_json = addon.settings.dump();
     MwStatus status = MW_ERROR_ADDON;
     try {
-        status = addon.api.start(&addon.host, settings_json.c_str());
+        status = addon.api.start(addon.instance_context, settings_json.c_str());
     } catch (...) {
         status = MW_ERROR_ADDON;
         if (error != nullptr) {
@@ -590,6 +723,11 @@ MwStatus CallStart(AddonState& addon, std::string* error) {
         }
     }
     if (status == MW_OK) {
+        if (!addon.owner_alive.load(std::memory_order_acquire)) {
+            (void)CallStop(addon, false, error);
+            if (error) *error = "owner exited while start callback was running";
+            return MW_ERROR_STATE;
+        }
         addon.state = AddonStateKind::Active;
         addon.last_code = MW_OK;
         addon.last_error.clear();
@@ -604,7 +742,7 @@ MwStatus CallStart(AddonState& addon, std::string* error) {
     try {
         // A failed start can have partially initialized add-on state. Ask it to
         // unwind cooperatively; DLL code remains resident if the callback fails.
-        rollback_status = addon.api.stop();
+        rollback_status = addon.api.stop(addon.instance_context);
     } catch (...) {
         rollback_status = MW_ERROR_ADDON;
         if (error != nullptr && error->empty()) {
@@ -642,7 +780,7 @@ MwStatus CallStart(AddonState& addon, std::string* error) {
     }
     addon.last_code = status;
     addon.last_error = error == nullptr ? CallbackError("start", status) : *error;
-    addon.state = status == MW_ERROR_MODULE_NOT_READY
+    addon.state = (status == MW_ERROR_MODULE_NOT_READY || status == MW_ERROR_SYMBOL_PENDING)
         ? AddonStateKind::AwaitingModule
         : AddonStateKind::Failed;
     return status;
@@ -666,7 +804,7 @@ MwStatus CallStop(AddonState& addon, bool require_active, std::string* error) {
     addon.accepting_hooks.store(false, std::memory_order_release);
     MwStatus callback_status = MW_ERROR_ADDON;
     try {
-        callback_status = addon.api.stop();
+        callback_status = addon.instance_created ? addon.api.stop(addon.instance_context) : MW_OK;
     } catch (...) {
         if (error != nullptr) {
             *error = "add-on stop callback raised a native exception";
@@ -822,7 +960,7 @@ bool ReadSettings(const Json& request, Json* settings) {
 
 Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request) {
     Json id = request.is_object() && request.contains("id") ? request["id"] : Json(nullptr);
-    std::lock_guard lifecycle_lock(runtime.lifecycle_mutex);
+    std::unique_lock registry_lock(runtime.registry_mutex);
     if (!request.is_object() || !id.is_number_unsigned() ||
         !request.contains("operation") || !request["operation"].is_string()) {
         return MakeResponse(runtime, session, id, MW_ERROR_ARGUMENT,
@@ -836,14 +974,22 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
     if (operation == "shutdown") {
         MwStatus first_status = MW_OK;
         std::string first_error;
+        std::vector<AddonState*> owned;
         for (auto& [key, addon] : runtime.addons) {
             (void)key;
             if (addon->owner_pid != session.owner_pid ||
                 addon->owner_creation_time != session.owner_creation_time) {
                 continue;
             }
+            owned.push_back(addon.get());
+        }
+        registry_lock.unlock();
+        for (AddonState* addon : owned) {
+            std::unique_lock instance_lock(addon->lifecycle_mutex, std::try_to_lock);
             std::string error;
-            const MwStatus status = CallStop(*addon, false, &error);
+            const MwStatus status = instance_lock.owns_lock()
+                ? CallStop(*addon, false, &error) : MW_ERROR_BUSY;
+            if (status == MW_ERROR_BUSY) error = "add-on callback is still running";
             if (status != MW_OK && first_status == MW_OK) {
                 first_status = status;
                 first_error = std::move(error);
@@ -880,11 +1026,16 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
         }
         if (found != runtime.addons.end()) {
             AddonState& addon = *found->second;
+            std::unique_lock instance_lock(addon.lifecycle_mutex, std::try_to_lock);
+            if (!instance_lock.owns_lock()) {
+                return MakeResponse(runtime, session, id, MW_ERROR_BUSY, "add-on callback is still running");
+            }
+            registry_lock.unlock();
             if ((addon.owner_pid != session.owner_pid ||
                 addon.owner_creation_time != session.owner_creation_time) &&
                 IsSessionActive(runtime, addon.owner_pid, addon.owner_creation_time)) {
                 return MakeResponse(runtime, session, id, MW_ERROR_STATE,
-                    "this add-on identity is already owned by another active companion; ABI v1 permits one instance per target process");
+                    "this logical add-on identity is already owned by another active companion");
             }
             std::array<uint8_t, 32> requested_image_sha256{};
             std::string hash_error;
@@ -909,6 +1060,7 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
             }
             addon.owner_pid = session.owner_pid;
             addon.owner_creation_time = session.owner_creation_time;
+            addon.owner_alive.store(!session.owner_lost.load(std::memory_order_acquire), std::memory_order_release);
             addon.settings = std::move(settings);
             std::string error;
             const MwStatus status = CallStart(addon, &error);
@@ -917,20 +1069,32 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
             }
             return MakeResponse(runtime, session, id, status, std::move(error));
         }
+        std::unique_lock loader_lock(runtime.loader_mutex, std::try_to_lock);
+        if (!loader_lock.owns_lock()) {
+            return MakeResponse(runtime, session, id, MW_ERROR_BUSY, "another add-on image is being initialized");
+        }
+        registry_lock.unlock();
         std::array<uint8_t, 32> image_sha256{};
         std::string hash_error;
         if (!Sha256File(canonical_path, &image_sha256, &hash_error)) {
             return MakeResponse(runtime, session, id, MW_ERROR_ADDON,
                 "could not verify add-on DLL: " + hash_error);
         }
+        HMODULE resident_image = nullptr;
+        registry_lock.lock();
         for (const auto& [other_id, other] : runtime.addons) {
             (void)other_id;
-            if (LowerPath(other->canonical_path) == LowerPath(canonical_path)) {
-                return MakeResponse(runtime, session, id, MW_ERROR_STATE, "this DLL is already loaded under another addonId");
-            }
+            if (other->image_sha256 == image_sha256) { resident_image = other->module; break; }
         }
-        HMODULE module = LoadLibraryExW(canonical_path.c_str(), nullptr,
-            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        registry_lock.unlock();
+        HMODULE module = nullptr;
+        if (resident_image) {
+            (void)GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                reinterpret_cast<const wchar_t*>(resident_image), &module);
+        } else {
+            module = LoadLibraryExW(canonical_path.c_str(), nullptr,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        }
         if (module == nullptr) {
             return MakeResponse(runtime, session, id, MW_ERROR_ADDON,
                 "LoadLibraryExW failed with Win32 error " + std::to_string(GetLastError()));
@@ -942,13 +1106,6 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
             return MakeResponse(runtime, session, id, MW_ERROR_ADDON,
                 hash_error.empty() ? "add-on DLL changed while it was being loaded" :
                     "could not recheck add-on DLL after loading: " + hash_error);
-        }
-        for (const auto& [other_id, other] : runtime.addons) {
-            (void)other_id;
-            if (other->module == module) {
-                FreeLibrary(module);
-                return MakeResponse(runtime, session, id, MW_ERROR_STATE, "this HMODULE is already owned by another addonId");
-            }
         }
         const auto get_api = reinterpret_cast<MwAddonGetApiFn>(
             GetProcAddress(module, "MwAddonGetApi"));
@@ -981,13 +1138,15 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
             static_cast<uint32_t>(offsetof(MwAddonApi, message_received));
         if (api_status != MW_OK || api.struct_size < kRequiredAddonApiSize ||
             api.abi_version != MW_NATIVE_ABI_VERSION || api.name_utf8 == nullptr ||
-            api.start == nullptr || api.settings_changed == nullptr || api.stop == nullptr) {
+            api.create_instance == nullptr || api.start == nullptr || api.settings_changed == nullptr || api.stop == nullptr ||
+            api.instance_policy > MW_ADDON_INSTANCE_MULTIPLE) {
             FreeLibrary(module);
             return MakeResponse(runtime, session, id, MW_ERROR_ABI, "add-on API table is incompatible or incomplete");
         }
-        std::array<const void*, 6> callback_code{
+        std::array<const void*, 7> callback_code{
             static_cast<const void*>(module),
             reinterpret_cast<const void*>(get_api),
+            reinterpret_cast<const void*>(api.create_instance),
             reinterpret_cast<const void*>(api.start),
             reinterpret_cast<const void*>(api.settings_changed),
             reinterpret_cast<const void*>(api.stop),
@@ -1008,6 +1167,17 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
                 "add-on callback table entry " + std::to_string(callback_index) +
                     " must point into committed image code");
         }
+        registry_lock.lock();
+        for (const auto& [other_id, other] : runtime.addons) {
+            (void)other_id;
+            if (other->module == module && (other->image_sha256 != image_sha256 ||
+                api.instance_policy == MW_ADDON_INSTANCE_SINGLETON)) {
+                FreeLibrary(module);
+                return MakeResponse(runtime, session, id, MW_ERROR_STATE,
+                    "this DLL declares a singleton instance or has a different resident image identity");
+            }
+        }
+        registry_lock.unlock();
         for (const void* code : callback_code) {
             if (code == nullptr) continue;
             if (mw::module_lifetime::PinAddress(code).disposition ==
@@ -1018,8 +1188,13 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
         }
         addon->api = api;
         addon->state = AddonStateKind::Stopped;
+        addon->owner_alive.store(!session.owner_lost.load(std::memory_order_acquire), std::memory_order_release);
         AddonState* state = addon.get();
+        std::unique_lock instance_lock(state->lifecycle_mutex);
+        registry_lock.lock();
         runtime.addons.emplace(addon_id, std::move(addon));
+        registry_lock.unlock();
+        loader_lock.unlock();
         std::string error;
         const MwStatus status = CallStart(*state, &error);
         if (status != MW_OK) {
@@ -1032,6 +1207,11 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
         return MakeResponse(runtime, session, id, MW_ERROR_STATE, "addonId is not loaded");
     }
     AddonState& addon = *found->second;
+    std::unique_lock instance_lock(addon.lifecycle_mutex, std::try_to_lock);
+    if (!instance_lock.owns_lock()) {
+        return MakeResponse(runtime, session, id, MW_ERROR_BUSY, "add-on callback is still running");
+    }
+    registry_lock.unlock();
 
     if (addon.owner_pid != session.owner_pid ||
         addon.owner_creation_time != session.owner_creation_time) {
@@ -1043,6 +1223,54 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
         (operation == "activate" || operation == "settings")) {
         return MakeResponse(runtime, session, id, MW_ERROR_STATE,
             "add-on calls are still draining; retry stop before activation or settings");
+    }
+
+    if (operation == "prepareSymbols") {
+        const auto symbols = request.find("symbols");
+        if (symbols == request.end() || !symbols->is_array()) {
+            return MakeResponse(runtime, session, id, MW_ERROR_ARGUMENT, "symbols must be an array");
+        }
+        std::map<std::pair<std::wstring, std::string>, void*> prepared;
+        for (const Json& entry : *symbols) {
+            std::wstring module_name;
+            if (!entry.is_object() || !entry.contains("module") || !entry["module"].is_string() ||
+                !entry.contains("name") || !entry["name"].is_string() ||
+                !Utf8ToWide(entry["module"].get_ref<const std::string&>(), &module_name)) {
+                return MakeResponse(runtime, session, id, MW_ERROR_ARGUMENT, "symbol preparation is malformed");
+            }
+            HMODULE module = nullptr;
+            if (!GetModuleHandleExW(0, module_name.c_str(), &module)) {
+                return MakeResponse(runtime, session, id, MW_ERROR_MODULE_NOT_READY, "symbol module is unavailable");
+            }
+            const auto pin = mw::module_lifetime::PinAddress(module);
+            Json actual;
+            const bool identified = pin.disposition != mw::module_lifetime::PinDisposition::Failure &&
+                SymbolModuleIdentity(module, &actual);
+            FreeLibrary(module);
+            if (!identified) {
+                return MakeResponse(runtime, session, id, MW_ERROR_MODULE_NOT_READY, "symbol module is unavailable");
+            }
+            for (const char* field : {"base", "size", "machine", "timestamp", "checksum", "pdbGuid", "pdbAge", "pdbFile"}) {
+                if (!entry.contains(field) || entry[field] != actual[field]) {
+                    return MakeResponse(runtime, session, id, MW_ERROR_STATE, "symbol module identity changed");
+                }
+            }
+            const bool missing = entry.value("missing", false);
+            const uint64_t rva = entry.value("rva", uint64_t(0));
+            if (!missing && !ExecutableRva(module, rva)) {
+                return MakeResponse(runtime, session, id, MW_ERROR_ARGUMENT, "symbol RVA is outside executable module code");
+            }
+            prepared.emplace(std::make_pair(LowerPath(module_name), entry["name"].get<std::string>()),
+                missing ? nullptr : reinterpret_cast<uint8_t*>(module) + rva);
+        }
+        {
+            std::lock_guard symbols_lock(addon.symbols_mutex);
+            for (const auto& [key, address] : prepared) {
+                addon.resolved_symbols[key] = address;
+                addon.pending_symbols.erase(key);
+            }
+        }
+        return MakeResponse(runtime, session, id, MW_OK);
     }
 
     if (operation == "settings") {
@@ -1059,7 +1287,7 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
         const std::string settings_json = settings.dump();
         MwStatus status = MW_ERROR_ADDON;
         try {
-            status = addon.api.settings_changed(settings_json.c_str());
+            status = addon.api.settings_changed(addon.instance_context, settings_json.c_str());
         } catch (...) {
             status = MW_ERROR_ADDON;
         }
@@ -1087,7 +1315,7 @@ Json HandleRequest(Runtime& runtime, WorkerSession& session, const Json& request
         const std::string message_json = message->dump();
         MwStatus status = MW_ERROR_ADDON;
         try {
-            status = addon.api.message_received(message_json.c_str());
+            status = addon.api.message_received(addon.instance_context, message_json.c_str());
         } catch (...) {
             status = MW_ERROR_ADDON;
         }
@@ -1166,7 +1394,7 @@ bool ServeConnectedPipe(HANDLE pipe, Runtime& runtime, WorkerSession& session) {
         try {
             pending.append(buffer, read_count);
         } catch (const std::bad_alloc&) {
-            std::lock_guard lifecycle_lock(runtime.lifecycle_mutex);
+            std::lock_guard lifecycle_lock(runtime.registry_mutex);
             WriteJsonLine(pipe, Json{{"id", nullptr}, {"ok", false}, {"code", MW_ERROR_IO},
                 {"error", "insufficient memory to buffer protocol request"},
                 {"addons", AllAddonStatuses(runtime)}});
@@ -1184,11 +1412,11 @@ bool ServeConnectedPipe(HANDLE pipe, Runtime& runtime, WorkerSession& session) {
                 const Json request = Json::parse(line);
                 response = HandleRequest(runtime, session, request);
             } catch (const Json::exception& error) {
-                std::lock_guard lifecycle_lock(runtime.lifecycle_mutex);
+                std::lock_guard lifecycle_lock(runtime.registry_mutex);
                 response = MakeResponse(runtime, session, nullptr, MW_ERROR_ARGUMENT,
                     std::string("invalid JSON: ") + error.what());
             } catch (...) {
-                std::lock_guard lifecycle_lock(runtime.lifecycle_mutex);
+                std::lock_guard lifecycle_lock(runtime.registry_mutex);
                 response = MakeResponse(runtime, session, nullptr, MW_ERROR_ADDON,
                     "unexpected native exception while handling request");
             }
@@ -1283,6 +1511,32 @@ struct OwnerMonitorStart {
     HANDLE finished_event = nullptr;
 };
 
+std::vector<AddonState*> OwnedAddons(Runtime& runtime, uint32_t pid, uint64_t creation) {
+    std::lock_guard registry_lock(runtime.registry_mutex);
+    std::vector<AddonState*> owned;
+    for (auto& [id, addon] : runtime.addons) {
+        (void)id;
+        if (addon->owner_pid == pid && addon->owner_creation_time == creation) {
+            owned.push_back(addon.get());
+        }
+    }
+    return owned; // States stay resident, so these pointers cannot be invalidated.
+}
+
+void DisableOwnedHooks(Runtime& runtime, uint32_t pid, uint64_t creation) {
+    for (AddonState* addon : OwnedAddons(runtime, pid, creation)) {
+        addon->owner_alive.store(false, std::memory_order_release);
+        addon->accepting_hooks.store(false, std::memory_order_release);
+        std::lock_guard backend_lock(runtime.backend_mutex);
+        for (uint64_t hook_id : addon->hook_ids) {
+            const auto found = runtime.hooks.find(hook_id);
+            if (found != runtime.hooks.end()) {
+                (void)mw::hooks::Disable(reinterpret_cast<ULONG_PTR>(addon), found->second.target);
+            }
+        }
+    }
+}
+
 DWORD WINAPI MonitorOwner(void* parameter) {
     std::unique_ptr<OwnerMonitorStart> start(
         static_cast<OwnerMonitorStart*>(parameter));
@@ -1290,6 +1544,8 @@ DWORD WINAPI MonitorOwner(void* parameter) {
     const DWORD result = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
     if (result == WAIT_OBJECT_0) {
         start->session->owner_lost.store(true, std::memory_order_release);
+        DisableOwnedHooks(GetRuntime(), start->session->owner_pid,
+            start->session->owner_creation_time);
         // Cancellation can race with the worker entering the next synchronous
         // pipe call. Retry until that worker observes shutdown and completes.
         while (WaitForSingleObject(start->finished_event, 10) == WAIT_TIMEOUT) {
@@ -1302,15 +1558,12 @@ DWORD WINAPI MonitorOwner(void* parameter) {
 
 void StopOwnedAddons(Runtime& runtime, uint32_t owner_pid,
     uint64_t owner_creation_time) {
-    std::lock_guard lifecycle_lock(runtime.lifecycle_mutex);
-    for (auto& [id, addon] : runtime.addons) {
-        (void)id;
-        if (addon->owner_pid != owner_pid ||
-            addon->owner_creation_time != owner_creation_time) {
-            continue;
-        }
+    DisableOwnedHooks(runtime, owner_pid, owner_creation_time);
+    for (AddonState* addon : OwnedAddons(runtime, owner_pid, owner_creation_time)) {
         const ULONGLONG deadline = GetTickCount64() + 1000;
         for (;;) {
+            std::unique_lock instance_lock(addon->lifecycle_mutex, std::try_to_lock);
+            if (!instance_lock.owns_lock()) break;
             std::string error;
             const MwStatus status = CallStop(*addon, false, &error);
             if (status != MW_ERROR_DRAIN_PENDING || GetTickCount64() >= deadline) {
@@ -1445,7 +1698,7 @@ DWORD WINAPI AgentWorker(void* parameter) {
 
     StopOwnedAddons(runtime, start->owner_pid, start->owner_creation_time);
     {
-        std::lock_guard lifecycle_lock(runtime.lifecycle_mutex);
+        std::lock_guard lifecycle_lock(runtime.registry_mutex);
         for (auto& [id, addon] : runtime.addons) {
             (void)id;
             if (addon->owner_pid == start->owner_pid &&

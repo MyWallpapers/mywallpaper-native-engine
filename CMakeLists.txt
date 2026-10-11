@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
-project(MyWallpaperNativeEngine VERSION 0.1.0 LANGUAGES C CXX)
+project(MyWallpaperNativeEngine VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_SUPPRESS_REGENERATION ON)
-if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT MSVC)
-    message(FATAL_ERROR "This initial engine targets Windows x64 with MSVC")
+if(NOT WIN32 OR NOT MSVC)
+    message(FATAL_ERROR "The engine requires Windows and MSVC (x86, x64, ARM64)")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -70,7 +70,7 @@ add_library(mw_native_hook_backend STATIC
     "${mh}/SlimDetours/Thread.c"
     "${MW_PATCHED_TRAMPOLINE_SOURCE}"
     "${MW_PATCHED_TRANSACTION_SOURCE}"
-    native/hook_backend_policy.c)
+    "${MW_RESIDENT_POLICY_SOURCE}")
 target_include_directories(mw_native_hook_backend PUBLIC "${mh}")
 target_include_directories(mw_native_hook_backend PRIVATE "${mh}/phnt" "${mh}/SlimDetours" native)
 target_compile_options(mw_native_hook_backend PRIVATE /std:clatest /utf-8 /W4 /permissive- /Brepro)
@@ -81,14 +81,23 @@ target_link_libraries(mw_native_agent PRIVATE mw_native_sdk mw_native_hook_backe
 target_compile_options(mw_native_agent PRIVATE /utf-8 /W4 /permissive- /Brepro)
 target_link_options(mw_native_agent PRIVATE /Brepro)
 set_target_properties(mw_native_agent PROPERTIES OUTPUT_NAME "mw-native-agent")
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    file(WRITE "${CMAKE_BINARY_DIR}/agent-exports.def" "EXPORTS\nMwAgentStart=_MwAgentStart@4\n")
+    target_sources(mw_native_agent PRIVATE "${CMAKE_BINARY_DIR}/agent-exports.def")
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
     add_executable(mw_native_fixture native/fixture.cpp)
     target_link_libraries(mw_native_fixture PRIVATE mw_native_sdk user32)
-    target_compile_options(mw_native_fixture PRIVATE /Ob0 /utf-8 /W4 /permissive- /Brepro)
+    target_compile_options(mw_native_fixture PRIVATE /Ob0 /Z7 /utf-8 /W4 /permissive- /Brepro)
     set_target_properties(mw_native_fixture PROPERTIES OUTPUT_NAME "mw-native-fixture")
-    target_link_options(mw_native_fixture PRIVATE /OPT:NOICF /Brepro)
+    target_link_options(mw_native_fixture PRIVATE /DEBUG:FULL /OPT:NOICF /Brepro)
+
+    add_library(mw_native_instance_fixture SHARED native/instance_fixture_addon.cpp)
+    target_link_libraries(mw_native_instance_fixture PRIVATE mw_native_sdk)
+    target_compile_options(mw_native_instance_fixture PRIVATE /utf-8 /W4 /permissive-)
+    set_target_properties(mw_native_instance_fixture PROPERTIES OUTPUT_NAME "mw-native-instance-fixture")
 
     add_library(mw_native_fixture_module SHARED native/fixture_module.cpp)
     target_link_libraries(mw_native_fixture_module PRIVATE mw_native_sdk)

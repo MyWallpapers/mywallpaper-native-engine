@@ -41,7 +41,14 @@ int __cdecl FixtureDetour(int value) {
     return original == nullptr ? value : original(value) + MW_FIXTURE_DELTA;
 }
 
-MwStatus MW_CALL Start(const MwHostApi* host, const char*) {
+MwStatus MW_CALL Create(const MwHostApi* host, const char*, void** context) {
+    if (!host || !context) return MW_ERROR_ARGUMENT;
+    *context = const_cast<MwHostApi*>(host);
+    return MW_OK;
+}
+
+MwStatus MW_CALL Start(void* context, const char*) {
+    const auto* host = static_cast<const MwHostApi*>(context);
     if (host == nullptr || host->abi_version != MW_NATIVE_ABI_VERSION ||
         host->resolve_export == nullptr || host->hook_create == nullptr ||
         host->hook_enable == nullptr || host->hook_remove == nullptr || g_active) {
@@ -73,7 +80,7 @@ MwStatus MW_CALL Start(const MwHostApi* host, const char*) {
     return MW_OK;
 }
 
-MwStatus MW_CALL SettingsChanged(const char* settings_json) {
+MwStatus MW_CALL SettingsChanged(void*, const char* settings_json) {
 #if MW_FIXTURE_REJECT_SETTING
     if (settings_json != nullptr &&
         std::string_view(settings_json).find("\"reject\":true") != std::string_view::npos) {
@@ -85,7 +92,7 @@ MwStatus MW_CALL SettingsChanged(const char* settings_json) {
     return MW_OK;
 }
 
-MwStatus MW_CALL Stop() {
+MwStatus MW_CALL Stop(void*) {
     if (!g_active || g_host == nullptr) {
         return MW_OK;
     }
@@ -116,6 +123,8 @@ extern "C" MW_EXPORT MwStatus MW_CALL MwAddonGetApi(uint32_t requested_abi,
 #endif
     api->abi_version = MW_NATIVE_ABI_VERSION;
     api->name_utf8 = MW_FIXTURE_ADDON_NAME;
+    api->instance_policy = MW_ADDON_INSTANCE_SINGLETON;
+    api->create_instance = &Create;
 #if MW_FIXTURE_INVALID_CALLBACK
     api->start = reinterpret_cast<decltype(api->start)>(static_cast<uintptr_t>(1));
 #else

@@ -55,6 +55,26 @@ struct BundleDescriptor {
     addon: DescriptorAddon,
     agent: String,
     target: DescriptorTarget,
+    #[serde(rename = "engineDirectory")]
+    engine_directory: Option<String>,
+    symbols: Option<DescriptorSymbols>,
+    launch: Option<DescriptorLaunch>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DescriptorLaunch {
+    executable: String,
+    #[serde(default)]
+    arguments: Vec<String>,
+    working_directory: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DescriptorSymbols {
+    cache_directory: Option<String>,
+    search_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +90,11 @@ struct DescriptorTarget {
     image_name: String,
     #[serde(rename = "windowClass")]
     window_class: Option<String>,
+    #[serde(default = "single_match", rename = "match")]
+    matching: String,
+}
+fn single_match() -> String {
+    "single".to_owned()
 }
 
 fn read_chunk<R: Read>(reader: &mut R) -> Result<Option<(u8, Vec<u8>)>, String> {
@@ -174,7 +199,10 @@ fn wire_error<W: Write>(writer: &mut W, message: &str, code: &str) {
 
 fn is_recoverable_active_addon_rejection(response: &Value, addon_id: &str) -> bool {
     response.get("ok") == Some(&Value::Bool(false))
-        && response.get("code").and_then(Value::as_u64) == Some(1)
+        && matches!(
+            response.get("code").and_then(Value::as_u64),
+            Some(1 | 4 | 11)
+        )
         && response
             .get("addons")
             .and_then(Value::as_array)
@@ -241,11 +269,13 @@ fn safe_filename(name: &str) -> bool {
             == Some(name)
 }
 
-fn load_descriptor() -> Result<(BundleDescriptor, std::path::PathBuf), String> {
+fn load_descriptor(
+    explicit_bundle: Option<&std::path::Path>,
+) -> Result<(BundleDescriptor, std::path::PathBuf), String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("cannot find companion executable: {error}"))?;
-    let bundle = executable
-        .parent()
+    let bundle = explicit_bundle
+        .or_else(|| executable.parent())
         .ok_or_else(|| "companion executable has no bundle directory".to_owned())?
         .canonicalize()
         .map_err(|error| format!("cannot resolve companion bundle directory: {error}"))?;
@@ -254,7 +284,7 @@ fn load_descriptor() -> Result<(BundleDescriptor, std::path::PathBuf), String> {
         .map_err(|error| format!("cannot read {}: {error}", descriptor_path.display()))?;
     let descriptor: BundleDescriptor = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid native-engine descriptor: {error}"))?;
-    if descriptor.schema_version != 1 {
+    if descriptor.schema_version != 1 && descriptor.schema_version != 2 {
         return Err("unsupported native-engine descriptor schemaVersion".to_owned());
     }
     if !safe_filename(&descriptor.agent)
@@ -272,6 +302,9 @@ fn load_descriptor() -> Result<(BundleDescriptor, std::path::PathBuf), String> {
             .is_some_and(|name| name.is_empty())
     {
         return Err("target declaration is invalid".to_owned());
+    }
+    if !matches!(descriptor.target.matching.as_str(), "single" | "all") {
+        return Err("target match must be single or all".to_owned());
     }
     Ok((descriptor, bundle))
 }
@@ -384,11 +417,101 @@ impl Drop for AgentSession {
 }
 
 #[cfg(windows)]
-fn run_after_init<R: Read, W: Write>(
-    init: HostFrame,
-    reader: &mut R,
-    writer: &mut W,
+struct ManagedSession {
+    session: AgentSession,
+    active: bool,
+    symbol_job: Option<u64>,
+}
+
+fn logical_identity(addon_id: &str, scratch: &str, digest: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for component in [addon_id, scratch, digest] {
+        hash.update(component.as_bytes());
+        hash.update([0]);
+    }
+    format!("instance-{:x}", hash.finalize())
+}
+
+#[cfg(windows)]
+fn pending_symbols(
+    response: &Value,
+    addon_id: &str,
+) -> Result<Vec<crate::symbols::SymbolRequest>, String> {
+    let requests = response["addons"]
+        .as_array()
+        .and_then(|addons| {
+            addons
+                .iter()
+                .find(|a| a["addonId"].as_str() == Some(addon_id))
+        })
+        .and_then(|addon| addon["pendingSymbols"].as_array());
+    requests.map_or(Ok(Vec::new()), |requests| {
+        requests
+            .iter()
+            .map(|r| {
+                serde_json::from_value(r.clone())
+                    .map_err(|e| format!("invalid symbol request: {e}"))
+            })
+            .collect()
+    })
+}
+
+#[cfg(windows)]
+fn queue_symbols(
+    managed: &mut ManagedSession,
+    response: &Value,
+    worker: &crate::symbols::Worker,
+    cache: &std::path::Path,
+    search: Option<&str>,
+    next_job: &mut u64,
 ) -> Result<(), String> {
+    if managed.symbol_job.is_some() {
+        return Ok(());
+    }
+    let requests = pending_symbols(response, &managed.session.addon_id)?;
+    if !requests.is_empty() {
+        *next_job = next_job
+            .checked_add(1)
+            .ok_or("symbol job identifier exhausted")?;
+        worker.submit(
+            *next_job,
+            requests,
+            cache.to_path_buf(),
+            search.map(str::to_owned),
+        )?;
+        managed.symbol_job = Some(*next_job);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn activated(response: &Value, before_entrypoint: bool) -> Result<bool, String> {
+    if response["ok"] == true {
+        return Ok(true);
+    }
+    if before_entrypoint && response["code"].as_u64() == Some(4) {
+        return Err("early add-on requires a module that loads after the entrypoint".to_owned());
+    }
+    if matches!(response["code"].as_u64(), Some(4 | 11)) {
+        return Ok(false);
+    }
+    Err(response["error"]
+        .as_str()
+        .unwrap_or("native activation failed")
+        .to_owned())
+}
+
+#[cfg(windows)]
+fn run_after_init<W: Write>(
+    init: HostFrame,
+    input: std::sync::mpsc::Receiver<Result<Option<Vec<u8>>, String>>,
+    writer: &mut W,
+    explicit_bundle: Option<&std::path::Path>,
+) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
     let HostFrame::Init {
         v,
         addon_id,
@@ -407,59 +530,232 @@ fn run_after_init<R: Read, W: Write>(
             "wire version {v} is unsupported; expected {WIRE_VERSION}"
         ));
     }
-    if target_architecture != "windows-x86_64" {
-        return Err("this companion supports only windows-x86_64 add-ons".to_owned());
-    }
+    let architecture = match target_architecture.as_str() {
+        "windows-x86_64" => "x64",
+        "windows-x86" => "x86",
+        "windows-arm64" => "arm64",
+        _ => return Err("unsupported Windows add-on architecture".to_owned()),
+    };
     if version.trim().is_empty() {
         return Err("init version must not be empty".to_owned());
     }
     let digest = valid_sha256_digest(&artifact_digest)
-        .ok_or_else(|| "artifactDigest must be sha256 followed by 64 hex characters".to_owned())?;
-    let (descriptor, bundle) = load_descriptor()?;
+        .ok_or("artifactDigest must be sha256 followed by 64 hex characters")?;
     validate_product_addon_id(&addon_id)?;
-    let agent_path = bundle_file(&bundle, &descriptor.agent)?;
+    let (descriptor, bundle) = load_descriptor(explicit_bundle)?;
     let addon_path = bundle_file(&bundle, &descriptor.addon.library)?;
-
-    if diagnostics_enabled() {
-        eprintln!(
-            "mw-native-engine identity: productAddonId={:?} artifactDigest=sha256:{} addonLibrary={}",
-            addon_id,
-            digest.to_ascii_lowercase(),
-            descriptor.addon.library,
-        );
-    }
-
-    write_json(writer, &json!({"type":"progress","v":WIRE_VERSION}))?;
-    let (target_pid, target_creation_time) = crate::platform::find_target_process(
-        &descriptor.target.image_name,
-        descriptor.target.window_class.as_deref(),
-    )?;
-    let (owner_pid, owner_creation_time) = crate::platform::current_process_identity()?;
-    let pipe_name = format!(r"\\.\pipe\mw-native-{}-{}", owner_pid, owner_creation_time);
-    let inject_response =
-        crate::platform::inject(target_pid, target_creation_time, &agent_path, &pipe_name)?;
-    log_diagnostic("inject", &inject_response);
-    // Remote thread creation can return before the target's named-pipe worker
-    // is ready. Renew the host's idle handshake deadline while connecting.
-    write_json(writer, &json!({"type":"progress","v":WIRE_VERSION}))?;
-    let mut session = AgentSession {
-        pipe: crate::platform::AgentPipeSession::connect(&pipe_name)?,
-        addon_id: format!("sha256-{}", digest.to_ascii_lowercase()),
-        next_request_id: 1,
-        stopped: false,
+    let engine_root = descriptor
+        .engine_directory
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("MW_NATIVE_ENGINE_HOME").map(std::path::PathBuf::from));
+    let agent_path = if let Some(root) = &engine_root {
+        if !root.is_absolute() {
+            return Err("engineDirectory must be absolute".to_owned());
+        }
+        root.join(architecture)
+            .join(&descriptor.agent)
+            .canonicalize()
+            .map_err(|e| format!("shared engine: {e}"))?
+    } else {
+        bundle_file(&bundle, &descriptor.agent)?
     };
-    let initial_settings = settings_snapshot(layer_settings, device_settings, &scratch_directory);
-    let mut load_fields = serde_json::Map::new();
-    load_fields.insert("path".to_owned(), json!(addon_path.to_string_lossy()));
-    load_fields.insert("settings".to_owned(), initial_settings);
-    session.request_required("load", load_fields)?;
-    write_json(writer, &json!({"type":"ready","v":WIRE_VERSION}))?;
-
-    while let Some(bytes) = read_record(reader)? {
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|error| format!("host record is not UTF-8: {error}"))?;
+    let symbol_cache = descriptor
+        .symbols
+        .as_ref()
+        .and_then(|s| s.cache_directory.as_ref())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("LOCALAPPDATA")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(&scratch_directory))
+                .join("MyWallpaper")
+                .join("NativeEngine")
+                .join("symbols")
+        });
+    let symbol_search = descriptor
+        .symbols
+        .as_ref()
+        .and_then(|s| s.search_path.as_deref());
+    let symbols = crate::symbols::Worker::new();
+    let mut next_job = 0;
+    let (owner_pid, owner_creation) = crate::platform::current_process_identity()?;
+    let identity = logical_identity(&addon_id, &scratch_directory, &digest.to_ascii_lowercase());
+    let mut settings = settings_snapshot(layer_settings, device_settings, &scratch_directory);
+    let mut sessions: BTreeMap<(u32, u64), ManagedSession> = BTreeMap::new();
+    let mut ready = false;
+    let mut next_discovery = Instant::now();
+    write_json(writer, &json!({"type":"progress","v":WIRE_VERSION}))?;
+    let mut launched = if let Some(launch) = &descriptor.launch {
+        if architecture != crate::platform::native_architecture() {
+            return Err(
+                "controlled launch requires the matching architecture companion".to_owned(),
+            );
+        }
+        let executable = std::path::Path::new(&launch.executable);
+        if !executable.file_name().is_some_and(|n| {
+            n.to_string_lossy()
+                .eq_ignore_ascii_case(&descriptor.target.image_name)
+        }) {
+            return Err("launch executable must match target imageName".to_owned());
+        }
+        Some(crate::launch::Prepared::create(
+            executable,
+            &launch.arguments,
+            launch
+                .working_directory
+                .as_deref()
+                .map(std::path::Path::new),
+        )?)
+    } else {
+        None
+    };
+    let launched_identity = launched
+        .as_ref()
+        .map(|child| crate::platform::identity(child.pid()))
+        .transpose()?;
+    loop {
+        if Instant::now() >= next_discovery {
+            next_discovery = Instant::now() + Duration::from_millis(500);
+            sessions.retain(|&(pid, creation), session| {
+                if crate::platform::process_alive(pid, creation) {
+                    true
+                } else {
+                    session.session.stopped = true;
+                    false
+                }
+            });
+            let targets = if let Some(target) = &launched_identity {
+                if crate::platform::process_alive(target.pid, target.creation_time) {
+                    vec![target.clone()]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                crate::platform::find_target_processes(
+                    &descriptor.target.image_name,
+                    descriptor.target.window_class.as_deref(),
+                )?
+            };
+            let targets: Vec<_> = targets
+                .into_iter()
+                .filter(|t| t.architecture == architecture)
+                .collect();
+            if descriptor.target.matching == "single" && targets.len() > 1 {
+                return Err(
+                    "target is ambiguous; use windowClass or explicitly select match=all"
+                        .to_owned(),
+                );
+            }
+            for target in targets {
+                let key = (target.pid, target.creation_time);
+                if sessions.contains_key(&key) {
+                    continue;
+                }
+                let pipe_name = format!(
+                    r"\\.\pipe\mw-native-{owner_pid}-{owner_creation}-{}-{}",
+                    key.0, key.1
+                );
+                let response = crate::platform::inject_dispatch(
+                    key.0,
+                    key.1,
+                    &agent_path,
+                    &pipe_name,
+                    architecture,
+                    engine_root.as_deref(),
+                )?;
+                log_diagnostic("inject", &response);
+                write_json(writer, &json!({"type":"progress","v":WIRE_VERSION}))?;
+                let mut managed = ManagedSession {
+                    session: AgentSession {
+                        pipe: crate::platform::AgentPipeSession::connect(&pipe_name)?,
+                        addon_id: identity.clone(),
+                        next_request_id: 1,
+                        stopped: false,
+                    },
+                    active: false,
+                    symbol_job: None,
+                };
+                let fields = serde_json::from_value(
+                    json!({"path":addon_path.to_string_lossy(),"settings":settings}),
+                )
+                .unwrap();
+                let loaded = managed.session.request("load", fields)?;
+                managed.active =
+                    activated(&loaded, launched.as_ref().is_some_and(|c| !c.resumed()))?;
+                queue_symbols(
+                    &mut managed,
+                    &loaded,
+                    &symbols,
+                    &symbol_cache,
+                    symbol_search,
+                    &mut next_job,
+                )?;
+                sessions.insert(key, managed);
+            }
+            for managed in sessions
+                .values_mut()
+                .filter(|s| !s.active && s.symbol_job.is_none())
+            {
+                let response = managed
+                    .session
+                    .request("activate", serde_json::Map::new())?;
+                managed.active =
+                    activated(&response, launched.as_ref().is_some_and(|c| !c.resumed()))?;
+                queue_symbols(
+                    managed,
+                    &response,
+                    &symbols,
+                    &symbol_cache,
+                    symbol_search,
+                    &mut next_job,
+                )?;
+            }
+            if !ready {
+                write_json(writer, &json!({"type":"progress","v":WIRE_VERSION}))?;
+            }
+        }
+        while let Some((job, result)) = symbols.try_result() {
+            let Some(managed) = sessions.values_mut().find(|s| s.symbol_job == Some(job)) else {
+                continue;
+            };
+            managed.symbol_job = None;
+            let prepared = result?;
+            let fields = serde_json::from_value(json!({"symbols":prepared})).unwrap();
+            managed.session.request_required("prepareSymbols", fields)?;
+            if managed.active {
+                continue;
+            }
+            let response = managed
+                .session
+                .request("activate", serde_json::Map::new())?;
+            managed.active = activated(&response, launched.as_ref().is_some_and(|c| !c.resumed()))?;
+            queue_symbols(
+                managed,
+                &response,
+                &symbols,
+                &symbol_cache,
+                symbol_search,
+                &mut next_job,
+            )?;
+        }
+        if !ready && !sessions.is_empty() && sessions.values().all(|s| s.active) {
+            if let Some(child) = &mut launched {
+                child.resume()?;
+            }
+            write_json(writer, &json!({"type":"ready","v":WIRE_VERSION}))?;
+            ready = true;
+        }
+        let record = match input.recv_timeout(Duration::from_millis(50)) {
+            Ok(record) => record?,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => None,
+        };
+        let Some(bytes) = record else {
+            break;
+        };
         let frame: HostFrame =
-            serde_json::from_str(text).map_err(|error| format!("invalid host frame: {error}"))?;
+            serde_json::from_slice(&bytes).map_err(|e| format!("invalid host frame: {e}"))?;
         match frame {
             HostFrame::Init { .. } => return Err("init may only appear once".to_owned()),
             HostFrame::Settings {
@@ -468,22 +764,35 @@ fn run_after_init<R: Read, W: Write>(
                 device_settings,
             } => {
                 if v != WIRE_VERSION {
-                    return Err("settings frame has an unsupported wire version".to_owned());
+                    return Err("unsupported settings wire version".to_owned());
                 }
-                let mut fields = serde_json::Map::new();
-                fields.insert(
-                    "settings".to_owned(),
-                    settings_snapshot(layer_settings, device_settings, &scratch_directory),
-                );
-                let response = session.request("settings", fields)?;
-                report_addon_rejection(
-                    writer,
-                    &response,
-                    &session.addon_id,
-                    "settings",
-                    "addon_settings_rejected",
-                    "native add-on rejected settings",
-                );
+                let candidate =
+                    settings_snapshot(layer_settings, device_settings, &scratch_directory);
+                let mut accepted = true;
+                for managed in sessions.values_mut() {
+                    let fields = serde_json::from_value(json!({"settings":candidate})).unwrap();
+                    let response = managed.session.request("settings", fields)?;
+                    accepted &= response["ok"] == true;
+                    queue_symbols(
+                        managed,
+                        &response,
+                        &symbols,
+                        &symbol_cache,
+                        symbol_search,
+                        &mut next_job,
+                    )?;
+                    report_addon_rejection(
+                        writer,
+                        &response,
+                        &managed.session.addon_id,
+                        "settings",
+                        "addon_settings_rejected",
+                        "native add-on rejected settings",
+                    );
+                }
+                if accepted {
+                    settings = candidate;
+                }
             }
             HostFrame::Message {
                 v,
@@ -493,44 +802,53 @@ fn run_after_init<R: Read, W: Write>(
                 payload,
             } => {
                 if v != WIRE_VERSION {
-                    return Err("message frame has an unsupported wire version".to_owned());
+                    return Err("unsupported message wire version".to_owned());
                 }
-                let mut fields = serde_json::Map::new();
-                fields.insert(
-                    "message".to_owned(),
-                    json!({
-                        "surface": surface,
-                        "instanceId": instance_id,
-                        "displayIndex": display_index,
-                        "payload": payload,
-                    }),
-                );
-                let response = session.request("message", fields)?;
-                report_addon_rejection(
-                    writer,
-                    &response,
-                    &session.addon_id,
-                    "message",
-                    "addon_message_rejected",
-                    "native add-on rejected message",
-                );
+                for managed in sessions.values_mut().filter(|s| s.active) {
+                    let fields = serde_json::from_value(json!({"message": {
+                        "surface":surface,"instanceId":instance_id,"displayIndex":display_index,"payload":payload
+                    }})).unwrap();
+                    let response = managed.session.request("message", fields)?;
+                    queue_symbols(
+                        managed,
+                        &response,
+                        &symbols,
+                        &symbol_cache,
+                        symbol_search,
+                        &mut next_job,
+                    )?;
+                    report_addon_rejection(
+                        writer,
+                        &response,
+                        &managed.session.addon_id,
+                        "message",
+                        "addon_message_rejected",
+                        "native add-on rejected message",
+                    );
+                }
             }
             HostFrame::Shutdown { v } => {
                 if v != WIRE_VERSION {
-                    return Err("shutdown frame has an unsupported wire version".to_owned());
+                    return Err("unsupported shutdown wire version".to_owned());
                 }
-                session.shutdown()?;
-                return Ok(());
+                break;
             }
         }
     }
-    session.shutdown()
+    for ((pid, creation), managed) in &mut sessions {
+        if crate::platform::process_alive(*pid, *creation) {
+            managed.session.shutdown()?;
+        } else {
+            managed.session.stopped = true;
+        }
+    }
+    Ok(())
 }
 
-pub fn run() -> Result<(), String> {
+pub fn run(explicit_bundle: Option<std::path::PathBuf>) -> Result<(), String> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    let mut reader = stdin.lock();
+    let mut reader = stdin;
     let mut writer = stdout.lock();
     let first = match read_record(&mut reader) {
         Ok(Some(record)) => record,
@@ -557,11 +875,21 @@ pub fn run() -> Result<(), String> {
         }
     };
     #[cfg(windows)]
-    let result = run_after_init(init, &mut reader, &mut writer);
+    let result = {
+        let (send, input) = std::sync::mpsc::sync_channel(32);
+        std::thread::spawn(move || loop {
+            let record = read_record(&mut reader);
+            let done = !matches!(&record, Ok(Some(_)));
+            if send.send(record).is_err() || done {
+                break;
+            }
+        });
+        run_after_init(init, input, &mut writer, explicit_bundle.as_deref())
+    };
     #[cfg(not(windows))]
     let result = {
         let _ = init;
-        Err("the native companion runs only on Windows x64".to_owned())
+        Err("the native companion requires Windows".to_owned())
     };
     if let Err(error) = &result {
         wire_error(&mut writer, error, "native_engine_error");

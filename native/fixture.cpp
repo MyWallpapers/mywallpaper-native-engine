@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -19,6 +20,7 @@
 
 extern "C" __declspec(dllexport) __declspec(noinline) int __cdecl MwFixtureCompute(int value);
 extern "C" __declspec(dllexport) __declspec(noinline) int __cdecl MwFixtureSecondary(int value);
+extern "C" __declspec(noinline) int __cdecl MwFixturePrivateCompute(int value);
 
 namespace {
 
@@ -552,6 +554,8 @@ Json HandleCommand(const Json& request) {
         response["ok"] = true;
         response["value"] = MwFixtureCompute(10);
         response["secondaryValue"] = MwFixtureSecondary(20);
+        response["privateValue"] = MwFixturePrivateCompute(30);
+        response["privateExportVisible"] = GetProcAddress(GetModuleHandleW(nullptr), "MwFixturePrivateCompute") != nullptr;
         response["sampleCount"] = g_sample_count.load(std::memory_order_relaxed);
         // Test-only evidence of physical restoration, distinct from returning
         // the baseline value through a resident replacement. Read while the
@@ -788,13 +792,24 @@ extern "C" __declspec(dllexport) __declspec(noinline) int __cdecl MwFixtureSecon
     return third;
 }
 
+extern "C" __declspec(noinline) int __cdecl MwFixturePrivateCompute(int value) {
+    volatile int first = value;
+    volatile int second = first;
+    volatile int third = second;
+    return third;
+}
+
 int wmain(int argc, wchar_t** argv) {
+    const int entry_value = MwFixtureCompute(10);
     std::wstring pipe_name;
+    std::wstring ready_file;
     uint32_t worker_count = 2;
     for (int index = 1; index < argc; ++index) {
         const std::wstring_view argument(argv[index]);
         if (argument == L"--pipe" && index + 1 < argc) {
             pipe_name = NormalizePipeName(argv[++index]);
+        } else if (argument == L"--ready-file" && index + 1 < argc) {
+            ready_file = argv[++index];
         } else if (argument == L"--workers" && index + 1 < argc) {
             const std::wstring_view value(argv[++index]);
             if (value == L"0") {
@@ -829,11 +844,17 @@ int wmain(int argc, wchar_t** argv) {
         workers.emplace_back(WorkerLoop, compute);
     }
 
-    std::cout << Json{
+    const auto ready = Json{
         {"event", "ready"},
         {"pid", GetCurrentProcessId()},
+        {"entryValue", entry_value},
         {"pipe", WideToUtf8(pipe_name)},
-        {"protocol", 1}}.dump() << std::endl;
+        {"protocol", 1}};
+    std::cout << ready.dump() << std::endl;
+    if (!ready_file.empty()) {
+        std::ofstream output(std::filesystem::path(ready_file), std::ios::binary);
+        output << ready.dump();
+    }
 
     const bool served = ServePipe(pipe_name);
     CancelAndJoinProbeCall();

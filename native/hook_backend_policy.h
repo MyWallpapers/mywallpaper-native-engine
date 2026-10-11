@@ -15,7 +15,7 @@ uint64_t MwBackendTrampolineSlotBytes(void);
 /* Called by the patched transaction backend when a trampoline becomes a bypass stub. */
 void MwBackendPolicyNoteRetiredTrampoline(void);
 
-/* Private, pinned x64 SlimDetours bridge. The caller serializes backend writes. */
+/* Private, pinned SlimDetours bridge. The caller serializes backend writes. */
 void* MwBackendResidentRoute(void* original);
 int MwBackendSetResidentRoute(void* original, void* route);
 void MwBackendReleaseOriginalStorage(uintptr_t identity, void* target);

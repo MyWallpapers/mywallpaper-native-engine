@@ -1,0 +1,186 @@
+--- a/src/MinHook.c
++++ b/src/MinHook.c
+@@ -145,13 +145,10 @@
+            (mi.Protect & PAGE_EXECUTE_FLAGS);
+ }
+ 
+-static void FreeHookTrampolineIfNeeded(PHOOK_ENTRY pHook)
+-{
+-    if (pHook->pTrampolineToFree)
+-    {
+-        SlimDetoursFreeTrampoline(pHook->pTrampolineToFree);
+-        pHook->pTrampolineToFree = NULL;
+-    }
++static void RetireHookTrampolineIfNeeded(PHOOK_ENTRY pHook)
++{
++    // Retired trampolines may still be reachable from a live hook chain or call frame.
++    pHook->pTrampolineToFree = NULL;
+ }
+ 
+ static HRESULT MHDetoursTransactionBegin()
+@@ -164,7 +161,7 @@
+ 
+ static HRESULT MHDetoursAttach(PHOOK_ENTRY pHook)
+ {
+-    FreeHookTrampolineIfNeeded(pHook);
++    RetireHookTrampolineIfNeeded(pHook);
+     LPVOID ppOriginal = pHook->ppOriginal ? pHook->ppOriginal : &pHook->pTargetOrTrampoline;
+     return SlimDetoursAttach(ppOriginal, pHook->pDetour);
+ }
+@@ -222,14 +219,15 @@
+                     PHOOK_ENTRY pHookIter = &g_hooks.pItems[i];
+                     if (pHookIter->ppOriginal == ppOriginal)
+                     {
+-                        pHookIter->pTargetOrTrampoline = *pHookIter->ppOriginal;
++                        pHookIter->pTargetOrTrampoline = InterlockedCompareExchangePointer(
++                            (PVOID volatile*)pHookIter->ppOriginal, NULL, NULL);
+                         pHookIter->ppOriginal = NULL;
+                     }
+                 }
+ 
+                 pHook->pTargetOrTrampoline = NULL;
+                 pHook->ppOriginal = ppOriginal;
+-                *ppOriginal = pTarget;
++                InterlockedExchangePointer((PVOID volatile*)ppOriginal, pTarget);
+             }
+             else
+             {
+@@ -393,7 +391,7 @@
+     UINT pos = FindHookEntryEnabled(hookIdent, pTarget, 0, FALSE);
+     while (pos != INVALID_HOOK_POS)
+     {
+-        FreeHookTrampolineIfNeeded(&g_hooks.pItems[pos]);
++        RetireHookTrampolineIfNeeded(&g_hooks.pItems[pos]);
+         DeleteHookEntry(pos);
+         pos = FindHookEntryEnabled(hookIdent, pTarget, pos, FALSE);
+     }
+@@ -826,3 +824,20 @@
+ 
+     return "(unknown)";
+ }
++
++void MwBackendReleaseOriginalStorage(ULONG_PTR identity, LPVOID target)
++{
++    if (!EnterEngine()) return;
++    UINT pos = FindHookEntry(identity, target, 0);
++    if (pos != INVALID_HOOK_POS)
++    {
++        PHOOK_ENTRY hook = &g_hooks.pItems[pos];
++        if (hook->ppOriginal)
++        {
++            hook->pTargetOrTrampoline = InterlockedCompareExchangePointer(
++                (PVOID volatile*)hook->ppOriginal, NULL, NULL);
++            hook->ppOriginal = NULL;
++        }
++    }
++    LeaveEngine();
++}
+--- a/src/SlimDetours/Transaction.c
++++ b/src/SlimDetours/Transaction.c
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include "SlimDetours.inl"
++#include "hook_backend_policy.h"
+ 
+ static _Interlocked_operand_ HANDLE volatile s_nPendingThreadId = NULL; // Thread owning pending transaction.
+ static PHANDLE s_phSuspendedThreads = NULL;
+@@ -354,7 +355,7 @@
+         pbCode = detour_gen_brk_arm64(pbCode, o->pTrampoline->pbRemain);
+ #endif
+         NtFlushInstructionCache(NtCurrentProcess(), o->pbTarget, pbCode - o->pbTarget);
+-        *o->ppbPointer = o->pTrampoline->rbCode;
++        InterlockedExchangePointer((PVOID volatile*)o->ppbPointer, o->pTrampoline->rbCode);
+         UNREFERENCED_PARAMETER(pbCode);
+ 
+         DETOUR_TRACE("detours: pbTarget=%p: "
+@@ -417,10 +418,11 @@
+         if (o->dwOperation == DETOUR_OPERATION_NONE || o->ppTrampolineToFreeManually != NULL)
+         {
+             // The trampoline outlives the transaction, put the hook in bypass mode.
++            MwBackendPolicyNoteRetiredTrampoline();
+             o->pTrampoline->pbDetour = o->pTrampoline->rbCode;
+         }
+ 
+-        *o->ppbPointer = o->pbTarget;
++        InterlockedExchangePointer((PVOID volatile*)o->ppbPointer, o->pbTarget);
+     }
+ 
+     // Update any suspended threads.
+--- a/src/SlimDetours/Trampoline.c
++++ b/src/SlimDetours/Trampoline.c
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include "SlimDetours.inl"
++#include "hook_backend_policy.h"
+ 
+ typedef struct _DETOUR_REGION DETOUR_REGION, *PDETOUR_REGION;
+ 
+@@ -496,3 +497,19 @@
+     }
+     return 0;
+ }
++
++// The caller serializes this query with hook backend operations.
++uint64_t MwBackendTrampolineRegionCount(void)
++{
++    uint64_t count = 0;
++    for (PDETOUR_REGION pRegion = s_pRegions; pRegion != NULL; pRegion = pRegion->pNext)
++    {
++        ++count;
++    }
++    return count;
++}
++
++uint64_t MwBackendTrampolineSlotBytes(void)
++{
++    return (uint64_t)sizeof(DETOUR_TRAMPOLINE);
++}
+--- /dev/null
++++ b/src/SlimDetours/MwResidentPolicy.c
+@@ -0,0 +1,44 @@
++#include "SlimDetours.inl"
++#include "hook_backend_policy.h"
++
++__declspec(align(8)) static volatile LONG64 g_retiredTrampolineCount = 0;
++
++void MwBackendPolicyNoteRetiredTrampoline(void)
++{
++    InterlockedIncrement64(&g_retiredTrampolineCount);
++}
++
++uint64_t MwBackendRetiredTrampolineCount(void)
++{
++    return (uint64_t)InterlockedCompareExchange64(&g_retiredTrampolineCount, 0, 0);
++}
++
++_STATIC_ASSERT(FIELD_OFFSET(DETOUR_TRAMPOLINE, rbCode) == 0);
++_STATIC_ASSERT(FIELD_OFFSET(DETOUR_TRAMPOLINE, pbDetour) % sizeof(void*) == 0);
++
++LPVOID MwBackendResidentRoute(LPVOID original)
++{
++    PDETOUR_TRAMPOLINE trampoline = original;
++    // This read occurs under the adapter mutex after physical installation.
++    // InterlockedCompareExchangePointer would require write access even when
++    // used as a read; the trampoline region is normally executable/read-only.
++    return *(PVOID volatile*)&trampoline->pbDetour;
++}
++
++BOOL MwBackendSetResidentRoute(LPVOID original, LPVOID route)
++{
++    PDETOUR_TRAMPOLINE trampoline = original;
++    DWORD oldProtection, ignored;
++    // The existing rbCodeIn jump reads this aligned cell. Its instructions
++    // and original continuation are never rewritten by logical stop/restart.
++    if (!VirtualProtect(&trampoline->pbDetour, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtection))
++        return FALSE;
++    PVOID previous = InterlockedExchangePointer((PVOID volatile*)&trampoline->pbDetour, route);
++    if (!VirtualProtect(&trampoline->pbDetour, sizeof(void*), oldProtection, &ignored))
++    {
++        InterlockedExchangePointer((PVOID volatile*)&trampoline->pbDetour, previous);
++        VirtualProtect(&trampoline->pbDetour, sizeof(void*), oldProtection, &ignored);
++        return FALSE;
++    }
++    return TRUE;
++}

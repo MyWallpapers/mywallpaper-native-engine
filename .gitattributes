@@ -4,3 +4,6 @@
 third_party/minhook-detours/** -text
 third_party/nlohmann/** -text
 third_party/rust-licenses/** -text
+
+# Unified-diff context lines contain a meaningful leading space on blank lines.
+third_party/patches/*.patch whitespace=-blank-at-eol

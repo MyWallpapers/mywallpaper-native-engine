@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.24)
+project(InstalledSdkConsumer LANGUAGES CXX)
+find_package(MyWallpaperNativeEngine 0.2 CONFIG REQUIRED)
+add_library(consumer MODULE addon.cpp)
+target_link_libraries(consumer PRIVATE MyWallpaperNativeEngine::SDK)
