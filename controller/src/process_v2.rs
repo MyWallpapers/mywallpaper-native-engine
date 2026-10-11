@@ -172,6 +172,45 @@ fn wire_error<W: Write>(writer: &mut W, message: &str, code: &str) {
     );
 }
 
+fn is_recoverable_active_addon_rejection(response: &Value, addon_id: &str) -> bool {
+    response.get("ok") == Some(&Value::Bool(false))
+        && response.get("code").and_then(Value::as_u64) == Some(1)
+        && response
+            .get("addons")
+            .and_then(Value::as_array)
+            .is_some_and(|addons| {
+                addons.iter().any(|addon| {
+                    addon.get("addonId").and_then(Value::as_str) == Some(addon_id)
+                        && addon.get("state").and_then(Value::as_str) == Some("active")
+                })
+            })
+}
+
+fn report_addon_rejection<W: Write>(
+    writer: &mut W,
+    response: &Value,
+    addon_id: &str,
+    operation: &str,
+    error_code: &str,
+    fallback_message: &str,
+) {
+    if response.get("ok") == Some(&Value::Bool(true)) {
+        return;
+    }
+
+    let message = response
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or(fallback_message);
+    if is_recoverable_active_addon_rejection(response, addon_id) {
+        eprintln!(
+            "mw-native-engine add-on {addon_id} rejected {operation}; companion remains active: {message}"
+        );
+    } else {
+        wire_error(writer, message, error_code);
+    }
+}
+
 fn valid_sha256_digest(value: &str) -> Option<&str> {
     let digest = value.strip_prefix("sha256:")?;
     if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -437,13 +476,14 @@ fn run_after_init<R: Read, W: Write>(
                     settings_snapshot(layer_settings, device_settings, &scratch_directory),
                 );
                 let response = session.request("settings", fields)?;
-                if response.get("ok") != Some(&Value::Bool(true)) {
-                    let message = response
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("native add-on rejected settings");
-                    wire_error(writer, message, "addon_settings_rejected");
-                }
+                report_addon_rejection(
+                    writer,
+                    &response,
+                    &session.addon_id,
+                    "settings",
+                    "addon_settings_rejected",
+                    "native add-on rejected settings",
+                );
             }
             HostFrame::Message {
                 v,
@@ -466,13 +506,14 @@ fn run_after_init<R: Read, W: Write>(
                     }),
                 );
                 let response = session.request("message", fields)?;
-                if response.get("ok") != Some(&Value::Bool(true)) {
-                    let message = response
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("native add-on rejected message");
-                    wire_error(writer, message, "addon_message_rejected");
-                }
+                report_addon_rejection(
+                    writer,
+                    &response,
+                    &session.addon_id,
+                    "message",
+                    "addon_message_rejected",
+                    "native add-on rejected message",
+                );
             }
             HostFrame::Shutdown { v } => {
                 if v != WIRE_VERSION {
@@ -595,5 +636,83 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(descriptor.addon.library, "taskbar.dll");
+    }
+
+    #[test]
+    fn active_argument_rejection_does_not_terminate_settings_sequence() {
+        let addon_id = "sha256-taskbar";
+        let invalid_settings = json!({
+            "ok": false,
+            "code": 1,
+            "error": "add-on settings callback rejected invalid JSON",
+            "addons": [{"addonId": addon_id, "state": "active"}]
+        });
+        let valid_settings = json!({"ok": true, "code": 0});
+        let mut wire_output = Vec::new();
+
+        report_addon_rejection(
+            &mut wire_output,
+            &invalid_settings,
+            addon_id,
+            "settings",
+            "addon_settings_rejected",
+            "native add-on rejected settings",
+        );
+        report_addon_rejection(
+            &mut wire_output,
+            &valid_settings,
+            addon_id,
+            "settings",
+            "addon_settings_rejected",
+            "native add-on rejected settings",
+        );
+
+        assert!(wire_output.is_empty());
+    }
+
+    #[test]
+    fn only_the_active_addons_argument_error_is_nonterminal() {
+        let addon_id = "sha256-taskbar";
+        let failed_state = json!({
+            "ok": false,
+            "code": 1,
+            "error": "argument rejected",
+            "addons": [{"addonId": addon_id, "state": "failed"}]
+        });
+        let different_addon_active = json!({
+            "ok": false,
+            "code": 1,
+            "error": "argument rejected",
+            "addons": [{"addonId": "sha256-other", "state": "active"}]
+        });
+        let other_code_active = json!({
+            "ok": false,
+            "code": 7,
+            "error": "native failure",
+            "addons": [{"addonId": addon_id, "state": "active"}]
+        });
+        assert!(!is_recoverable_active_addon_rejection(
+            &failed_state,
+            addon_id
+        ));
+        assert!(!is_recoverable_active_addon_rejection(
+            &different_addon_active,
+            addon_id
+        ));
+        assert!(!is_recoverable_active_addon_rejection(
+            &other_code_active,
+            addon_id
+        ));
+
+        let mut wire_output = Vec::new();
+        report_addon_rejection(
+            &mut wire_output,
+            &failed_state,
+            addon_id,
+            "settings",
+            "addon_settings_rejected",
+            "native add-on rejected settings",
+        );
+        assert!(!wire_output.is_empty());
     }
 }
