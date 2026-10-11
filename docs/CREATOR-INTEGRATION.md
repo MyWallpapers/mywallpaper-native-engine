@@ -94,6 +94,36 @@ same physical hook; different artifacts and arbitrary add-on resources remain
 outside that reuse measurement. ARM64 SDK qualification does not add ARM64
 Desktop launch support.
 
+The final standalone runtime is commit
+`4503fc986c36c6b37e8c56c4b8c6d0c5d0701738`, qualified by all three jobs in
+[run 38152262222](https://github.com/MyWallpapers/mywallpaper-native-engine/actions/runs/38152262222).
+The Rust controller now links its C runtime statically, matching the native
+agent and example. Import inspection of all nine packaged executables/DLLs
+confirmed that no Visual C++ redistributable DLL is required. The combined
+three-architecture package passed the SDK installer with its published hashes.
+
+| Final CI target | Foundation target change / 1,000 cycles | Physical hook records | SDK target change / 100 cycles |
+| --- | ---: | ---: | ---: |
+| x64 | 0 bytes | 1 | +69,632 bytes |
+| x86 | +69,632 bytes | 1 | +73,728 bytes |
+| ARM64 | +28,672 bytes | 1 | -49,152 bytes |
+
+The corresponding final local SDK run measured 0 bytes on x64 and +4,096 on
+x86. The varying endpoints are documented rather than presented as zero-memory
+growth guarantees. Reuse of the same physical hook was verified separately.
+
+Distribution:
+
+- Engine sources: private `MyWallpapers/mywallpaper-native-engine`, branch
+  `codex/native-engine-foundation`; repository visibility verified after export.
+- Public [MIT SDK](https://github.com/MyWallpapers/mywallpaper-native-sdk): only
+  headers, CMake package, launcher, example, tools, documentation and notices.
+- [Developer preview 0.2.1](https://github.com/MyWallpapers/mywallpaper-native-sdk/releases/tag/v0.2.1):
+  SDK source archive, runtime binary archive, qualification JSON and checksums.
+- [MyWallpaper diagnostic PR #911](https://github.com/MyWallpapers/MyWallpaper/pull/911):
+  two source files, based on the active branch's examined commit. No automatic
+  merge, app restart, target injection into Explorer or launch migration.
+
 ## Impact and retained contracts
 
 Reviewed all callers of exact symbol resolution and worker results in the
