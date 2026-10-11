@@ -164,14 +164,18 @@ def main():
             nonlocal request_id
             request_id+=1;return pipe.call({"id":request_id,"operation":operation,"addonId":"direct-private",**fields})
         try:
-            response=native("load",path=str(multi),settings={"deviceSettings":{"target":"private","delta":7}})
+            response=native("load",path=str(multi),settings={"deviceSettings":{"target":"private","delta":7,"drainOnce":True}})
             assert response["code"]==11,response
             request=response["addons"][0]["pendingSymbols"][0];prepared={**request,"rva":cold["rva"]}
             rejected=native("prepareSymbols",symbols=[{**prepared,"pdbAge":request["pdbAge"]+1}]);assert rejected["code"]==3
             assert native("prepareSymbols",symbols=[prepared])["ok"]
             assert native("activate")["ok"]
             sample=fixture.sample();assert sample["privateValue"]==37 and not sample["privateExportVisible"]
-            assert native("stop")["ok"];assert fixture.sample()["privateValue"]==30
+            deferred=native("stop")
+            assert deferred["code"]==9 and deferred["addons"][0]["hookCount"]==1,deferred
+            assert fixture.sample()["privateValue"]==30 and native("activate")["code"]==3
+            assert native("stop")["ok"]
+            assert native("settings",settings={"deviceSettings":{"target":"private","delta":7}})["ok"]
             for _ in range(100):assert native("activate")["ok"] and native("stop")["ok"]
             baseline=memory(target["pid"]);before=native("status")
             start=time.monotonic()
@@ -183,6 +187,18 @@ def main():
             results["reuse"]={"cycles":1000,"seconds":round(time.monotonic()-start,3),"privateBytesBefore":baseline,
                 "privateBytesAfter":final,"retainedHookRecords":after["backend"]["retainedHookRecords"],
                 "trampolineRegionBytes":after["backend"]["trampolineRegionBytes"],"mismatchedPdbRejected":True}
+            # The same deferred-stop contract applies to partial start rollback.
+            failed_id="failed-start-private"
+            loaded=native("load",addonId=failed_id,path=str(multi),settings={"deviceSettings":
+                {"target":"private","delta":7,"drainOnce":True,"failStartAfterHook":True}})
+            assert loaded["code"]==11,loaded
+            failed_request=next(a for a in loaded["addons"] if a["addonId"]==failed_id)["pendingSymbols"][0]
+            assert native("prepareSymbols",addonId=failed_id,symbols=[{**failed_request,"rva":cold["rva"]}])["ok"]
+            rollback=native("activate",addonId=failed_id)
+            assert rollback["code"]==9,rollback
+            assert fixture.sample()["privateValue"]==30
+            assert native("stop",addonId=failed_id)["ok"]
+            results["drain"]={"deferredStopPreservesHandles":True,"partialStartRollbackCanFinish":True}
             assert native("shutdown")["ok"]
         finally:pipe.close()
         fixture.stop()
@@ -234,6 +250,11 @@ def main():
         no_hooks.kill();K.SetEvent(startup_release)
         wait_for(lambda:K.WaitForSingleObject(resource,0)==258,"owner death cleans non-hook startup resources")
         results["instances"]["ownerDeathCleansNoHookStartup"]=True
+        deferred_companion=tracked(companion,a,{"target":"compute","delta":5,"drainOnce":True},
+            "deferred-stop-context",root/"scratch-deferred-stop")
+        deferred_companion.ready();assert fixture.sample()["value"]==15
+        deferred_companion.stop();assert fixture.sample()["value"]==10
+        results["drain"]["companionRetriesDeferredStop"]=True
         fixture.stop()
 
         # Common manager follows all matching processes, then restarts them and

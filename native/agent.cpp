@@ -667,7 +667,7 @@ void BuildHostApi(AddonState& addon) {
     addon.host.resolve_symbol = &HostResolveSymbol;
 }
 
-MwStatus CleanupHooks(AddonState& addon, std::string* error) {
+MwStatus CleanupHooks(AddonState& addon, std::string* error, bool remove = true) {
     Runtime& runtime = GetRuntime();
     std::lock_guard lock(runtime.backend_mutex);
     MwStatus first_error = MW_OK;
@@ -678,17 +678,21 @@ MwStatus CleanupHooks(AddonState& addon, std::string* error) {
             addon.hook_ids.erase(id);
             continue;
         }
-        const MH_STATUS status = mw::hooks::Remove(
-            reinterpret_cast<ULONG_PTR>(&addon), found->second.target);
+        const MH_STATUS status = remove
+            ? mw::hooks::Remove(reinterpret_cast<ULONG_PTR>(&addon), found->second.target)
+            : mw::hooks::Disable(reinterpret_cast<ULONG_PTR>(&addon), found->second.target);
         if (status == MH_OK) {
-            addon.hook_ids.erase(id);
-            runtime.hooks.erase(found);
+            if (remove) {
+                addon.hook_ids.erase(id);
+                runtime.hooks.erase(found);
+            }
         } else if (first_error == MW_OK) {
+            const char* operation = remove ? "MH_RemoveHookEx" : "MH_DisableHookEx";
             first_error = MapHookStatus(status);
             if (error != nullptr) {
-                *error = HookStatusMessage("MH_RemoveHookEx", status);
+                *error = HookStatusMessage(operation, status);
             }
-            RecordBackendDiagnosticLocked(addon, "MH_RemoveHookEx", status);
+            RecordBackendDiagnosticLocked(addon, operation, status);
         }
     }
     return first_error;
@@ -752,7 +756,7 @@ MwStatus CallStart(AddonState& addon, std::string* error) {
         }
     }
     std::string cleanup_error;
-    const MwStatus cleanup_status = CleanupHooks(addon, &cleanup_error);
+    const MwStatus cleanup_status = CleanupHooks(addon, &cleanup_error, rollback_status == MW_OK);
     if (cleanup_status != MW_OK) {
         addon.state = AddonStateKind::Draining;
         addon.last_code = cleanup_status;
@@ -765,7 +769,7 @@ MwStatus CallStart(AddonState& addon, std::string* error) {
     if (rollback_status == MW_ERROR_DRAIN_PENDING) {
         addon.state = AddonStateKind::Draining;
         addon.last_code = rollback_status;
-        addon.last_error = "failed start rolled back hooks; entered calls are still draining";
+        addon.last_error = "failed start disabled hooks; entered calls are still draining";
         if (error != nullptr) {
             *error = addon.last_error;
         }
@@ -813,7 +817,9 @@ MwStatus CallStop(AddonState& addon, bool require_active, std::string* error) {
         }
     }
     std::string cleanup_error;
-    const MwStatus cleanup_status = CleanupHooks(addon, &cleanup_error);
+    // A deferred/failed stop may still need its hook IDs on retry. Disable
+    // effects now, and retire those logical handles only after stop succeeds.
+    const MwStatus cleanup_status = CleanupHooks(addon, &cleanup_error, callback_status == MW_OK);
     if (cleanup_status != MW_OK) {
         addon.state = AddonStateKind::Draining;
         addon.last_code = cleanup_status;
@@ -1529,13 +1535,7 @@ void DisableOwnedHooks(Runtime& runtime, uint32_t pid, uint64_t creation) {
     for (AddonState* addon : OwnedAddons(runtime, pid, creation)) {
         addon->owner_alive.store(false, std::memory_order_release);
         addon->accepting_hooks.store(false, std::memory_order_release);
-        std::lock_guard backend_lock(runtime.backend_mutex);
-        for (uint64_t hook_id : addon->hook_ids) {
-            const auto found = runtime.hooks.find(hook_id);
-            if (found != runtime.hooks.end()) {
-                (void)mw::hooks::Disable(reinterpret_cast<ULONG_PTR>(addon), found->second.target);
-            }
-        }
+        (void)CleanupHooks(*addon, nullptr, false);
     }
 }
 

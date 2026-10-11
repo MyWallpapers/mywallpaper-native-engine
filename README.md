@@ -54,7 +54,9 @@ stable scratch directories. Multiple instances do not supply automatic compositi
 rules for several hooks on the same function.
 
 Stop disables effects and drains cooperative entered calls.
-`MW_ERROR_DRAIN_PENDING` preserves resources for another stop attempt.
+`MW_ERROR_DRAIN_PENDING` preserves resources and logical hook IDs for another
+stop attempt; effects are disabled meanwhile. The companion retries cooperative
+shutdown for up to one second. Individual native callbacks still have to return.
 DLL images, contexts and physical bridges remain resident for lifetime safety.
 Repeated restarts of one stable artifact reuse these records. Different versions,
 identities or hook targets can still increase retention indefinitely.

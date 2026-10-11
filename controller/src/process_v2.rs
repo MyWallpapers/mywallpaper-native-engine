@@ -402,7 +402,23 @@ impl AgentSession {
         if self.stopped {
             return Ok(());
         }
-        let response = self.request_required("shutdown", serde_json::Map::new())?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let response = loop {
+            let response = self.request("shutdown", serde_json::Map::new())?;
+            if response["ok"] == true {
+                break response;
+            }
+            if matches!(response["code"].as_u64(), Some(9 | 10))
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            return Err(response["error"]
+                .as_str()
+                .unwrap_or("native shutdown failed")
+                .to_owned());
+        };
         self.stopped = true;
         log_diagnostic("shutdown-complete", &response);
         Ok(())

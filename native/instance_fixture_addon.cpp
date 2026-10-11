@@ -14,6 +14,7 @@ struct Instance {
     uint64_t hook = 0;
     int slot = -1;
     HANDLE resource = nullptr;
+    bool drain_once = false;
 };
 struct Slot {
     void* original = nullptr;
@@ -78,6 +79,7 @@ MwStatus MW_CALL Start(void* context, const char* text) {
     if (resolved != MW_OK) return resolved;
     std::lock_guard lock(slot_mutex);
     if (slots[index].instance.load()) return MW_ERROR_STATE;
+    instance->drain_once = settings.value("drainOnce", false);
     instance->delta = settings.value("delta", 1);
     void* detour = index == 2 ? reinterpret_cast<void*>(&Private)
         : index == 1 ? reinterpret_cast<void*>(&Secondary) : reinterpret_cast<void*>(&Compute);
@@ -86,6 +88,7 @@ MwStatus MW_CALL Start(void* context, const char* text) {
     instance->slot = index;
     slots[index].instance = instance;
     status = host->hook_enable(host->addon_context, instance->hook);
+    if (status == MW_OK && settings.value("failStartAfterHook", false)) return MW_ERROR_ADDON;
     return status;
 }
 MwStatus MW_CALL Settings(void* context, const char* text) {
@@ -111,6 +114,10 @@ MwStatus MW_CALL Stop(void* context) {
         ResetEvent(instance->resource);
         CloseHandle(instance->resource);
         instance->resource = nullptr;
+    }
+    if (instance->drain_once) {
+        instance->drain_once = false;
+        return MW_ERROR_DRAIN_PENDING;
     }
     if (instance->slot < 0) return MW_OK;
     std::lock_guard lock(slot_mutex);

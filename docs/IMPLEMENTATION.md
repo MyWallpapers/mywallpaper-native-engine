@@ -135,6 +135,11 @@ The real Windows symbol probe is recorded separately in
   before cooperative cleanup so that an empty hook list does not skip the add-on's
   stop callback. A dedicated fixture owns and releases a native event resource
   while its start callback is blocked; its owner-loss regression passes on x64.
+- Traced normal stop and partial-start rollback with `MW_ERROR_DRAIN_PENDING`.
+  Effects are disabled while logical hook IDs remain valid for the stop retry;
+  successful cleanup retires those handles. The companion performs bounded
+  cooperative retries instead of reporting the first pending drain as fatal.
+  Direct-session and process-v2 fixture regressions cover all three paths.
 - Updated the original session test's rejection expectation to match the existing
   wire contract: recoverable active settings rejection is an stderr diagnostic,
   not a terminal host error. Added scenario tests for new behavior rather than
